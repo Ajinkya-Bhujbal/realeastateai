@@ -38,17 +38,18 @@ def start_scheduler():
             id="unread_processor",
             replace_existing=True,
         )
-        # Email polling: every 5 minutes (only if Gmail configured)
+        # Email polling: every 1 minute (only if Gmail configured)
         gmail_user = os.getenv("GMAIL_USER", "")
         gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
         if gmail_user and gmail_pass:
             scheduler.add_job(
                 process_email_leads,
-                trigger=IntervalTrigger(minutes=5),
+                trigger=IntervalTrigger(minutes=1),
                 id="email_poller",
                 replace_existing=True,
+                next_run_time=datetime.datetime.now(),  # Run immediately on startup
             )
-            print("Email poller started (5 min) - checking Gmail for new leads")
+            print("Email poller started (1 min) - checking Gmail for new leads")
         else:
             print("Email poller skipped - GMAIL_USER/GMAIL_APP_PASSWORD not set in .env")
         scheduler.start()
