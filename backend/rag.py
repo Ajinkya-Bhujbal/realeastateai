@@ -16,11 +16,11 @@ KB_DIR = os.path.join(DATA_DIR, "knowledge_base")
 
 
 def _get_embedder():
-    """Lazy-load the embedding model. Uses all-MiniLM-L6-v2 (~80MB, very light)."""
+    """Lazy-load the embedding model. Uses multilingual model for Hinglish support (~120MB, light)."""
     global _embedder
     if _embedder is None:
         from sentence_transformers import SentenceTransformer
-        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        _embedder = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
     return _embedder
 
 
