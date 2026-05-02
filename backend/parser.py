@@ -212,11 +212,11 @@ def fetch_gmail_leads(
         mail.login(gmail_user, gmail_app_password)
         mail.select(folder)
 
-        # Search for real estate portal emails
+        # Search for UNSEEN emails from real estate portals
         search_queries = [
-            '(FROM "housing.com")',
-            '(FROM "99acres.com")',
-            '(FROM "magicbricks.com")',
+            '(UNSEEN FROM "housing.com")',
+            '(UNSEEN FROM "99acres.com")',
+            '(UNSEEN FROM "magicbricks.com")',
         ]
 
         seen_ids = set()

@@ -1,7 +1,8 @@
 """
-Follow-up automation + Unread message auto-reply processor.
+Follow-up automation + Unread message auto-reply processor + Email polling.
 APScheduler based.
 """
+import os
 import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -11,6 +12,7 @@ from models import Lead, Message, FollowUpSchedule
 from whatsapp import send_whatsapp_message
 from ai import generate_followup_message, generate_rag_reply
 from rag import search_kb, search_properties
+from parser import fetch_gmail_leads
 
 # Global scheduler
 scheduler = BackgroundScheduler(
@@ -20,7 +22,7 @@ scheduler = BackgroundScheduler(
 
 
 def start_scheduler():
-    """Start the follow-up scheduler + unread message processor."""
+    """Start the follow-up scheduler + unread message processor + email poller."""
     if not scheduler.running:
         # Follow-up processor: every 5 minutes
         scheduler.add_job(
@@ -36,6 +38,19 @@ def start_scheduler():
             id="unread_processor",
             replace_existing=True,
         )
+        # Email polling: every 5 minutes (only if Gmail configured)
+        gmail_user = os.getenv("GMAIL_USER", "")
+        gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+        if gmail_user and gmail_pass:
+            scheduler.add_job(
+                process_email_leads,
+                trigger=IntervalTrigger(minutes=5),
+                id="email_poller",
+                replace_existing=True,
+            )
+            print("Email poller started (5 min) - checking Gmail for new leads")
+        else:
+            print("Email poller skipped - GMAIL_USER/GMAIL_APP_PASSWORD not set in .env")
         scheduler.start()
         print("Follow-up scheduler started (5 min)")
         print("Unread auto-reply processor started (10 sec)")
@@ -242,3 +257,61 @@ def create_followup_schedule(
     db.commit()
     db.refresh(schedule)
     return schedule
+
+
+def process_email_leads():
+    """
+    Periodically fetch new leads from Gmail.
+    Only processes UNSEEN emails from real estate portals.
+    Deduplicates by phone and email.
+    """
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    if not gmail_user or not gmail_pass:
+        return
+
+    db = SessionLocal()
+    try:
+        leads = fetch_gmail_leads(gmail_user, gmail_pass, max_emails=10)
+        created = 0
+        skipped = 0
+
+        for parsed in leads:
+            name = parsed.get("name", "").strip() or "Unknown"
+            phone = parsed.get("phone", "").strip()
+            lead_email = parsed.get("email", "").strip()
+
+            # Dedup: check if lead with same phone or email already exists
+            existing = None
+            if phone:
+                existing = db.query(Lead).filter(Lead.phone == phone).first()
+            if not existing and lead_email:
+                existing = db.query(Lead).filter(Lead.email == lead_email).first()
+
+            if existing:
+                skipped += 1
+                continue
+
+            lead = Lead(
+                name=name,
+                phone=phone,
+                email=lead_email,
+                source=parsed.get("source", "email"),
+                status="new",
+                budget_min=parsed.get("budget_min"),
+                budget_max=parsed.get("budget_max"),
+                preferred_location=parsed.get("preferred_location", ""),
+                property_type=parsed.get("property_type", ""),
+                notes=parsed.get("notes", "")[:500],
+            )
+            db.add(lead)
+            created += 1
+
+        db.commit()
+        if created > 0:
+            print(f"Email poller: {created} new leads created, {skipped} duplicates skipped")
+    except Exception as e:
+        print(f"Email polling error: {e}")
+        db.rollback()
+    finally:
+        db.close()
