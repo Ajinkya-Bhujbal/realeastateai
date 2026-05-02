@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LeadPilot — AI Real Estate Lead Manager</title>
+    <meta name="description" content="AI-powered local real estate lead management system">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+            <div class="brand-icon">&#127968;</div>
+            <span class="brand-text">LeadPilot</span>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-view="dashboard" id="nav-dashboard">&#128202; Dashboard</a>
+            <a href="#" class="nav-item" data-view="leads" id="nav-leads">&#128101; Leads</a>
+            <a href="#" class="nav-item" data-view="properties" id="nav-properties">&#127969; Properties</a>
+            <a href="#" class="nav-item" data-view="messages" id="nav-messages">&#128172; Messages</a>
+            <a href="#" class="nav-item" data-view="ai" id="nav-ai">&#129302; AI Tools</a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="ai-status" id="ai-status-indicator">
+                <span class="status-dot offline"></span>
+                <span class="status-text">Checking AI...</span>
+            </div>
+        </div>
+    </aside>
+
+    <main class="main-content" id="main-content">
+        <header class="top-header">
+            <div class="header-left">
+                <button class="menu-toggle" id="menu-toggle">&#9776;</button>
+                <h1 class="page-title" id="page-title">Dashboard</h1>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-primary btn-sm" id="btn-add-lead">+ Add Lead</button>
+                <button class="btn btn-outline btn-sm" id="btn-parse-email">&#9993; Parse Email</button>
+            </div>
+        </header>
+
+        <!-- Dashboard View -->
+        <div class="view active" id="view-dashboard">
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card stat-total"><div class="stat-info"><span class="stat-value" id="stat-total">0</span><span class="stat-label">Total Leads</span></div></div>
+                <div class="stat-card stat-new"><div class="stat-info"><span class="stat-value" id="stat-new">0</span><span class="stat-label">New</span></div></div>
+                <div class="stat-card stat-contacted"><div class="stat-info"><span class="stat-value" id="stat-contacted">0</span><span class="stat-label">Contacted</span></div></div>
+                <div class="stat-card stat-converted"><div class="stat-info"><span class="stat-value" id="stat-converted">0</span><span class="stat-label">Converted</span></div></div>
+                <div class="stat-card stat-messages"><div class="stat-info"><span class="stat-value" id="stat-messages">0</span><span class="stat-label">Messages</span></div></div>
+                <div class="stat-card stat-followups"><div class="stat-info"><span class="stat-value" id="stat-followups">0</span><span class="stat-label">Follow-ups</span></div></div>
+            </div>
+            <div class="dashboard-grid">
+                <div class="card"><div class="card-header"><h3>Recent Leads</h3></div><div class="card-body" id="recent-leads-list"><div class="empty-state">No leads yet</div></div></div>
+                <div class="card"><div class="card-header"><h3>Leads by Source</h3></div><div class="card-body" id="source-chart"><div class="empty-state">No data</div></div></div>
+            </div>
+        </div>
+
+        <!-- Leads View -->
+        <div class="view" id="view-leads">
+            <div class="view-controls">
+                <div class="search-box"><input type="text" placeholder="Search leads..." id="lead-search" /></div>
+                <select id="filter-status" class="select-input"><option value="">All Status</option><option value="new">New</option><option value="contacted">Contacted</option><option value="interested">Interested</option><option value="converted">Converted</option><option value="lost">Lost</option></select>
+                <select id="filter-source" class="select-input"><option value="">All Sources</option><option value="housing">Housing.com</option><option value="99acres">99acres</option><option value="magicbricks">MagicBricks</option><option value="manual">Manual</option></select>
+            </div>
+            <div class="table-container">
+                <table class="data-table" id="leads-table"><thead><tr><th>Name</th><th>Phone</th><th>Source</th><th>Status</th><th>Budget</th><th>Location</th><th>Actions</th></tr></thead><tbody id="leads-tbody"></tbody></table>
+            </div>
+        </div>
+
+        <!-- Properties View -->
+        <div class="view" id="view-properties">
+            <div class="view-controls">
+                <div class="search-box"><input type="text" placeholder="AI property search..." id="property-search" /></div>
+                <button class="btn btn-primary btn-sm" id="btn-search-properties">Search</button>
+                <button class="btn btn-outline btn-sm" id="btn-index-samples">Index Samples</button>
+            </div>
+            <div class="properties-grid" id="properties-grid"><div class="empty-state">Search properties or index samples</div></div>
+        </div>
+
+        <!-- Messages View -->
+        <div class="view" id="view-messages">
+            <div class="messages-layout">
+                <div class="leads-sidebar" id="msg-leads-list"><div class="empty-state small">Loading...</div></div>
+                <div class="chat-area" id="chat-area">
+                    <div class="chat-header" id="chat-header">Select a lead</div>
+                    <div class="chat-messages" id="chat-messages"><div class="empty-state">No conversation selected</div></div>
+                    <div class="chat-input" id="chat-input-area" style="display:none">
+                        <input type="text" placeholder="Type a message..." id="chat-input" />
+                        <button class="btn btn-primary btn-sm" id="btn-send-msg">Send</button>
+                        <button class="btn btn-accent btn-sm" id="btn-ai-reply">&#129302; AI</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AI Tools View -->
+        <div class="view" id="view-ai">
+            <div class="ai-tools-grid">
+                <div class="card"><div class="card-header"><h3>&#129302; AI Status</h3></div><div class="card-body" id="ai-status-detail"><p>Checking...</p></div></div>
+                <div class="card"><div class="card-header"><h3>&#128231; Parse Email</h3></div><div class="card-body">
+                    <div class="form-group"><label>Sender</label><input type="text" id="parse-sender" class="form-input" placeholder="leads@housing.com" /></div>
+                    <div class="form-group"><label>Subject</label><input type="text" id="parse-subject" class="form-input" placeholder="New enquiry from Rahul" /></div>
+                    <div class="form-group"><label>Body</label><textarea id="parse-body" class="form-input" rows="4" placeholder="Name: Rahul Sharma&#10;Phone: 9876543210&#10;Budget: 50-80 Lakhs"></textarea></div>
+                    <button class="btn btn-primary" id="btn-do-parse">Parse & Save</button>
+                    <div class="result-box" id="parse-result" style="display:none"></div>
+                </div></div>
+                <div class="card"><div class="card-header"><h3>&#128270; RAG Search</h3></div><div class="card-body">
+                    <div class="form-group"><label>Query</label><input type="text" id="rag-query" class="form-input" placeholder="3BHK Whitefield under 100L" /></div>
+                    <button class="btn btn-primary" id="btn-rag-search">Search</button>
+                    <div class="result-box" id="rag-result" style="display:none"></div>
+                </div></div>
+                <div class="card"><div class="card-header"><h3>&#9200; Follow-up</h3></div><div class="card-body">
+                    <div class="form-group"><label>Lead ID</label><input type="number" id="fu-lead-id" class="form-input" placeholder="1" /></div>
+                    <div class="form-group"><label>Frequency (hrs)</label><input type="number" id="fu-frequency" class="form-input" value="24" /></div>
+                    <div class="form-group"><label>Max Follow-ups</label><input type="number" id="fu-max" class="form-input" value="5" /></div>
+                    <button class="btn btn-primary" id="btn-create-followup">Create</button>
+                    <div class="result-box" id="followup-result" style="display:none"></div>
+                </div></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add Lead Modal -->
+    <div class="modal-overlay" id="modal-overlay" style="display:none">
+        <div class="modal" id="add-lead-modal">
+            <div class="modal-header"><h3>Add New Lead</h3><button class="modal-close" id="modal-close">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-row"><div class="form-group"><label>Name *</label><input type="text" id="new-lead-name" class="form-input" required /></div><div class="form-group"><label>Phone</label><input type="text" id="new-lead-phone" class="form-input" /></div></div>
+                <div class="form-row"><div class="form-group"><label>Email</label><input type="email" id="new-lead-email" class="form-input" /></div><div class="form-group"><label>Source</label><select id="new-lead-source" class="form-input"><option value="manual">Manual</option><option value="housing">Housing.com</option><option value="99acres">99acres</option><option value="magicbricks">MagicBricks</option></select></div></div>
+                <div class="form-row"><div class="form-group"><label>Budget Min (L)</label><input type="number" id="new-lead-budget-min" class="form-input" /></div><div class="form-group"><label>Budget Max (L)</label><input type="number" id="new-lead-budget-max" class="form-input" /></div></div>
+                <div class="form-row"><div class="form-group"><label>Location</label><input type="text" id="new-lead-location" class="form-input" /></div><div class="form-group"><label>Type</label><select id="new-lead-type" class="form-input"><option value="">Any</option><option value="apartment">Apartment</option><option value="villa">Villa</option><option value="plot">Plot</option><option value="office">Office</option></select></div></div>
+                <div class="form-group"><label>Notes</label><textarea id="new-lead-notes" class="form-input" rows="2"></textarea></div>
+            </div>
+            <div class="modal-footer"><button class="btn btn-outline" id="btn-cancel-lead">Cancel</button><button class="btn btn-primary" id="btn-save-lead">Save Lead</button></div>
+        </div>
+    </div>
+    <div class="toast-container" id="toast-container"></div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

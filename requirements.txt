@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+requests
+apscheduler
+chromadb
+sentence-transformers
