@@ -1,9 +1,10 @@
 """
-RAG module - ChromaDB + sentence-transformers for property recommendations.
+RAG module - ChromaDB + sentence-transformers for property recommendations + knowledge base.
 Uses a small embedding model to keep RAM low.
 """
 import os
 import json
+import glob
 import chromadb
 from chromadb.config import Settings
 
@@ -11,6 +12,7 @@ from chromadb.config import Settings
 _embedder = None
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "chroma_db")
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+KB_DIR = os.path.join(DATA_DIR, "knowledge_base")
 
 
 def _get_embedder():
@@ -27,6 +29,8 @@ def get_chroma_client():
     os.makedirs(CHROMA_DIR, exist_ok=True)
     return chromadb.PersistentClient(path=CHROMA_DIR)
 
+
+# ─── Properties Collection ─────────────────────────
 
 def get_or_create_collection(client=None):
     """Get or create the properties collection."""
@@ -55,7 +59,6 @@ def index_property(prop: dict, collection=None):
     if collection is None:
         collection = get_or_create_collection()
 
-    # Build searchable text
     text = _property_to_text(prop)
     embedding = embed_text(text)
 
@@ -79,11 +82,9 @@ def index_properties_bulk(properties: list):
     collection = get_or_create_collection()
 
     ids = []
-    documents = []
-    embeddings_list = []
+    texts = []
     metadatas = []
 
-    texts = []
     for prop in properties:
         text = _property_to_text(prop)
         texts.append(text)
@@ -109,12 +110,8 @@ def index_properties_bulk(properties: list):
 
 
 def search_properties(query: str, n_results: int = 5, filters: dict = None) -> list:
-    """
-    Search properties using semantic similarity.
-    Returns list of dicts with property info + relevance score.
-    """
+    """Search properties using semantic similarity."""
     collection = get_or_create_collection()
-
     query_embedding = embed_text(query)
 
     where_filter = None
@@ -142,7 +139,6 @@ def search_properties(query: str, n_results: int = 5, filters: dict = None) -> l
             include=["documents", "metadatas", "distances"],
         )
     except Exception:
-        # Fallback without filter if filter fails
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=min(n_results, 10),
@@ -189,3 +185,131 @@ def _property_to_text(prop: dict) -> str:
         prop.get("description", ""),
     ]
     return " | ".join([p for p in parts if p and str(p).strip()])
+
+
+# ─── Knowledge Base Collection ─────────────────────
+
+def get_or_create_kb_collection(client=None):
+    """Get or create the knowledge base collection."""
+    if client is None:
+        client = get_chroma_client()
+    return client.get_or_create_collection(
+        name="knowledge_base",
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    """Split text into overlapping chunks for better retrieval."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end - overlap
+    return chunks
+
+
+def index_kb_file(filepath: str) -> int:
+    """Index a single .txt or .md file into the KB collection."""
+    collection = get_or_create_kb_collection()
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"Error reading {filepath}: {e}")
+        return 0
+
+    if not content.strip():
+        return 0
+
+    filename = os.path.basename(filepath)
+    chunks = _chunk_text(content)
+
+    if not chunks:
+        return 0
+
+    ids = [f"{filename}__chunk_{i}" for i in range(len(chunks))]
+    metadatas = [{"source": filename, "chunk_index": i} for i in range(len(chunks))]
+    embeddings = embed_texts(chunks)
+
+    collection.upsert(
+        ids=ids,
+        documents=chunks,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+    return len(chunks)
+
+
+def index_kb_folder() -> dict:
+    """Index all .txt and .md files in data/knowledge_base/."""
+    os.makedirs(KB_DIR, exist_ok=True)
+
+    files = glob.glob(os.path.join(KB_DIR, "*.txt")) + glob.glob(os.path.join(KB_DIR, "*.md"))
+    total_chunks = 0
+    indexed_files = []
+
+    for f in files:
+        count = index_kb_file(f)
+        total_chunks += count
+        indexed_files.append({"file": os.path.basename(f), "chunks": count})
+        print(f"KB indexed: {os.path.basename(f)} -> {count} chunks")
+
+    return {"files": len(files), "total_chunks": total_chunks, "details": indexed_files}
+
+
+def search_kb(query: str, n_results: int = 3) -> list:
+    """Search the knowledge base using semantic similarity."""
+    collection = get_or_create_kb_collection()
+
+    try:
+        count = collection.count()
+        if count == 0:
+            return []
+    except Exception:
+        return []
+
+    query_embedding = embed_text(query)
+
+    try:
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(n_results, count),
+            include=["documents", "metadatas", "distances"],
+        )
+    except Exception:
+        return []
+
+    kb_results = []
+    if results and results["documents"] and results["documents"][0]:
+        for i, doc in enumerate(results["documents"][0]):
+            kb_results.append({
+                "text": doc,
+                "source": results["metadatas"][0][i].get("source", "") if results["metadatas"][0] else "",
+                "relevance": 1 - results["distances"][0][i] if results["distances"][0] else 0,
+            })
+
+    return kb_results
+
+
+def get_kb_status() -> dict:
+    """Get knowledge base status."""
+    os.makedirs(KB_DIR, exist_ok=True)
+    files = glob.glob(os.path.join(KB_DIR, "*.txt")) + glob.glob(os.path.join(KB_DIR, "*.md"))
+
+    try:
+        collection = get_or_create_kb_collection()
+        chunk_count = collection.count()
+    except Exception:
+        chunk_count = 0
+
+    return {
+        "files": len(files),
+        "file_names": [os.path.basename(f) for f in files],
+        "indexed_chunks": chunk_count,
+        "kb_path": KB_DIR,
+    }

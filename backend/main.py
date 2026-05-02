@@ -29,9 +29,12 @@ from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_messag
 from ai import (
     check_ollama, list_models, generate_lead_reply,
     generate_followup_message, generate_property_recommendation,
-    generate_auto_reply, summarize_lead,
+    generate_auto_reply, generate_rag_reply, summarize_lead,
 )
-from rag import search_properties, index_property, load_sample_properties, index_properties_bulk
+from rag import (
+    search_properties, index_property, load_sample_properties, index_properties_bulk,
+    search_kb, index_kb_folder, get_kb_status,
+)
 from followup import start_scheduler, stop_scheduler, create_followup_schedule
 
 
@@ -478,7 +481,7 @@ def whatsapp_webhook_verify(
 
 @app.post("/api/webhook/whatsapp")
 async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_db)):
-    """Receive incoming WhatsApp messages."""
+    """Receive incoming WhatsApp messages. Stores as unread; auto-reply handled by scheduler."""
     try:
         payload = await request.json()
     except Exception:
@@ -492,14 +495,12 @@ async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_d
     text = parsed["message_text"]
 
     # Find lead by phone
-    # Strip country code for matching
     phone_clean = phone[-10:] if len(phone) > 10 else phone
     lead = db.query(Lead).filter(
         (Lead.phone == phone) | (Lead.phone == phone_clean) | (Lead.phone.endswith(phone_clean))
     ).first()
 
     if not lead:
-        # Auto-create lead from incoming message
         lead = Lead(
             name=parsed.get("sender_name", "Unknown"),
             phone=phone_clean,
@@ -511,7 +512,7 @@ async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_d
         db.commit()
         db.refresh(lead)
 
-    # Save incoming message
+    # Save incoming message as UNREAD
     incoming = Message(
         lead_id=lead.id,
         direction="in",
@@ -519,24 +520,14 @@ async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_d
         content=text,
         status="received",
         wa_message_id=parsed.get("message_id", ""),
+        is_read=False,
+        is_auto_replied=False,
     )
     db.add(incoming)
 
-    # Generate and send auto-reply
-    context = f"Budget: {lead.budget_min}-{lead.budget_max}L, Location: {lead.preferred_location}, Type: {lead.property_type}"
-    reply_text = generate_auto_reply(text, lead.name, context)
-
-    if reply_text and not reply_text.startswith("["):
-        result = send_whatsapp_message(phone, reply_text)
-        outgoing = Message(
-            lead_id=lead.id,
-            direction="out",
-            channel="whatsapp",
-            content=reply_text,
-            status="sent" if result.get("success") or result.get("mock") else "failed",
-            wa_message_id=result.get("message_id", ""),
-        )
-        db.add(outgoing)
+    # Update lead tracking
+    lead.last_message_at = datetime.datetime.utcnow()
+    lead.unread_count = (lead.unread_count or 0) + 1
 
     db.commit()
     return JSONResponse({"status": "ok"})
@@ -790,6 +781,214 @@ def dashboard_stats(db: Session = Depends(get_db)):
             for l in recent
         ],
     }
+
+
+# ─── Chat API (WhatsApp Web-style) ────────────────────────────────────
+
+@app.get("/api/chats")
+def list_chats(db: Session = Depends(get_db)):
+    """List all conversations sorted by last message time. For WhatsApp Web sidebar."""
+    leads = (
+        db.query(Lead)
+        .filter(Lead.phone != None, Lead.phone != "")
+        .order_by(Lead.last_message_at.desc().nullslast(), Lead.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    chats = []
+    for l in leads:
+        last_msg = (
+            db.query(Message)
+            .filter(Message.lead_id == l.id)
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+        chats.append({
+            "lead_id": l.id,
+            "name": l.name,
+            "phone": l.phone,
+            "status": l.status,
+            "source": l.source,
+            "unread_count": l.unread_count or 0,
+            "auto_reply_enabled": l.auto_reply_enabled if l.auto_reply_enabled is not None else True,
+            "last_message": last_msg.content[:80] if last_msg else "",
+            "last_message_direction": last_msg.direction if last_msg else "",
+            "last_message_at": (last_msg.created_at.isoformat() if last_msg and last_msg.created_at else
+                                l.last_message_at.isoformat() if l.last_message_at else
+                                l.created_at.isoformat() if l.created_at else None),
+        })
+    return {"chats": chats}
+
+
+@app.get("/api/chats/{lead_id}")
+def get_chat_messages(lead_id: int, limit: int = 100, db: Session = Depends(get_db)):
+    """Get full chat history for a lead."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    messages = (
+        db.query(Message)
+        .filter(Message.lead_id == lead_id)
+        .order_by(Message.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "lead_id": lead.id,
+        "name": lead.name,
+        "phone": lead.phone,
+        "status": lead.status,
+        "auto_reply_enabled": lead.auto_reply_enabled if lead.auto_reply_enabled is not None else True,
+        "messages": [
+            {
+                "id": m.id,
+                "direction": m.direction,
+                "content": m.content,
+                "status": m.status,
+                "is_read": m.is_read,
+                "is_auto_replied": m.is_auto_replied,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ],
+    }
+
+
+@app.post("/api/chats/{lead_id}/read")
+def mark_chat_read(lead_id: int, db: Session = Depends(get_db)):
+    """Mark all messages for a lead as read, reset unread count."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    db.query(Message).filter(
+        Message.lead_id == lead_id,
+        Message.direction == "in",
+        Message.is_read == False,
+    ).update({"is_read": True})
+    lead.unread_count = 0
+    db.commit()
+    return {"status": "ok", "lead_id": lead_id}
+
+
+@app.post("/api/chats/{lead_id}/send")
+def send_chat_message(lead_id: int, req: SendMessageRequest, db: Session = Depends(get_db)):
+    """Send a message from the chat UI."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if not lead.phone:
+        raise HTTPException(status_code=400, detail="Lead has no phone number")
+
+    result = send_whatsapp_message(lead.phone, req.message)
+
+    msg = Message(
+        lead_id=lead.id,
+        direction="out",
+        channel="whatsapp",
+        content=req.message,
+        status="sent" if result.get("success") or result.get("mock") else "failed",
+        wa_message_id=result.get("message_id", ""),
+        is_read=True,
+    )
+    db.add(msg)
+    lead.last_message_at = datetime.datetime.utcnow()
+    if lead.status == "new":
+        lead.status = "contacted"
+    db.commit()
+    return {"message_id": msg.id, "wa_result": result}
+
+
+class SimulateMessageRequest(BaseModel):
+    phone: str
+    message: str
+    sender_name: str = "Test User"
+
+
+@app.post("/api/chats/simulate-incoming")
+def simulate_incoming_message(req: SimulateMessageRequest, db: Session = Depends(get_db)):
+    """Simulate an incoming WhatsApp message (for testing without webhook)."""
+    phone_clean = req.phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+    if len(phone_clean) > 10:
+        phone_clean = phone_clean[-10:]
+
+    lead = db.query(Lead).filter(
+        (Lead.phone == req.phone) | (Lead.phone == phone_clean) | (Lead.phone.endswith(phone_clean))
+    ).first()
+
+    if not lead:
+        lead = Lead(
+            name=req.sender_name,
+            phone=phone_clean,
+            source="whatsapp",
+            status="new",
+            auto_reply_enabled=True,
+        )
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+
+    incoming = Message(
+        lead_id=lead.id,
+        direction="in",
+        channel="whatsapp",
+        content=req.message,
+        status="received",
+        is_read=False,
+        is_auto_replied=False,
+    )
+    db.add(incoming)
+    lead.last_message_at = datetime.datetime.utcnow()
+    lead.unread_count = (lead.unread_count or 0) + 1
+    db.commit()
+    return {"status": "ok", "lead_id": lead.id, "message": "Incoming message simulated"}
+
+
+@app.post("/api/chats/{lead_id}/toggle-auto-reply")
+def toggle_auto_reply(lead_id: int, db: Session = Depends(get_db)):
+    """Toggle auto-reply on/off for a lead."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead.auto_reply_enabled = not (lead.auto_reply_enabled if lead.auto_reply_enabled is not None else True)
+    db.commit()
+    return {"lead_id": lead.id, "auto_reply_enabled": lead.auto_reply_enabled}
+
+
+@app.get("/api/chats/unread-count")
+def get_total_unread(db: Session = Depends(get_db)):
+    """Get total unread message count across all leads."""
+    from sqlalchemy import func
+    total = db.query(func.sum(Lead.unread_count)).scalar() or 0
+    return {"total_unread": int(total)}
+
+
+# ─── Knowledge Base API ──────────────────────────────────────────────
+
+@app.post("/api/kb/index")
+def index_knowledge_base():
+    """Index all .txt and .md files in data/knowledge_base/."""
+    result = index_kb_folder()
+    return result
+
+
+@app.get("/api/kb/status")
+def knowledge_base_status():
+    """Get knowledge base status."""
+    return get_kb_status()
+
+
+class KBSearchRequest(BaseModel):
+    query: str
+    n_results: int = 3
+
+
+@app.post("/api/kb/search")
+def search_knowledge_base(req: KBSearchRequest):
+    """Search the knowledge base."""
+    results = search_kb(req.query, req.n_results)
+    return {"query": req.query, "results": results}
 
 
 # ─── Run Server ───────────────────────────────────────────────────────

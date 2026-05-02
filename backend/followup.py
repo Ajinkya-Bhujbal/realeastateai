@@ -1,6 +1,6 @@
 """
-Follow-up automation - APScheduler based.
-Handles scheduled follow-ups with customizable frequency.
+Follow-up automation + Unread message auto-reply processor.
+APScheduler based.
 """
 import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from db import SessionLocal
 from models import Lead, Message, FollowUpSchedule
 from whatsapp import send_whatsapp_message
-from ai import generate_followup_message
+from ai import generate_followup_message, generate_rag_reply
+from rag import search_kb, search_properties
 
 # Global scheduler
 scheduler = BackgroundScheduler(
@@ -19,23 +20,130 @@ scheduler = BackgroundScheduler(
 
 
 def start_scheduler():
-    """Start the follow-up scheduler. Checks every 5 minutes."""
+    """Start the follow-up scheduler + unread message processor."""
     if not scheduler.running:
+        # Follow-up processor: every 5 minutes
         scheduler.add_job(
             process_followups,
             trigger=IntervalTrigger(minutes=5),
             id="followup_processor",
             replace_existing=True,
         )
+        # Unread message auto-reply: every 10 seconds
+        scheduler.add_job(
+            process_unread_messages,
+            trigger=IntervalTrigger(seconds=10),
+            id="unread_processor",
+            replace_existing=True,
+        )
         scheduler.start()
-        print("Follow-up scheduler started (checks every 5 minutes)")
+        print("Follow-up scheduler started (5 min)")
+        print("Unread auto-reply processor started (10 sec)")
 
 
 def stop_scheduler():
     """Stop the scheduler gracefully."""
     if scheduler.running:
         scheduler.shutdown(wait=False)
-        print("Follow-up scheduler stopped")
+        print("Schedulers stopped")
+
+
+def process_unread_messages():
+    """
+    Process unread incoming messages:
+    1. Find all unread, un-replied incoming messages
+    2. For each, generate AI reply using RAG (knowledge base + properties)
+    3. Send reply via WhatsApp
+    4. Store in DB
+    """
+    db = SessionLocal()
+    try:
+        # Find unread incoming messages that haven't been auto-replied
+        unread = (
+            db.query(Message)
+            .filter(
+                Message.direction == "in",
+                Message.is_auto_replied == False,
+            )
+            .order_by(Message.created_at.asc())
+            .limit(5)  # Process max 5 at a time
+            .all()
+        )
+
+        for msg in unread:
+            lead = db.query(Lead).filter(Lead.id == msg.lead_id).first()
+            if not lead:
+                msg.is_auto_replied = True
+                continue
+
+            # Skip if auto-reply disabled for this lead
+            if not lead.auto_reply_enabled:
+                msg.is_auto_replied = True
+                continue
+
+            if not lead.phone:
+                msg.is_auto_replied = True
+                continue
+
+            # Build lead context
+            lead_context = f"Budget: {lead.budget_min or '?'}-{lead.budget_max or '?'}L, Location: {lead.preferred_location or '?'}, Type: {lead.property_type or '?'}"
+
+            # Search knowledge base for relevant info
+            kb_results = []
+            try:
+                kb_results = search_kb(msg.content, n_results=3)
+            except Exception as e:
+                print(f"KB search error: {e}")
+
+            # Search properties for relevant matches
+            property_results = []
+            try:
+                property_results = search_properties(msg.content, n_results=2)
+            except Exception as e:
+                print(f"Property search error: {e}")
+
+            # Generate AI reply with RAG context
+            reply_text = generate_rag_reply(
+                incoming_message=msg.content,
+                lead_name=lead.name,
+                lead_context=lead_context,
+                kb_results=kb_results,
+                property_results=property_results,
+            )
+
+            if reply_text and not reply_text.startswith("["):
+                # Send via WhatsApp
+                result = send_whatsapp_message(lead.phone, reply_text)
+
+                # Store outgoing message
+                outgoing = Message(
+                    lead_id=lead.id,
+                    direction="out",
+                    channel="whatsapp",
+                    content=reply_text,
+                    status="sent" if result.get("success") or result.get("mock") else "failed",
+                    wa_message_id=result.get("message_id", ""),
+                    is_read=True,
+                    is_auto_replied=False,
+                )
+                db.add(outgoing)
+
+                # Update lead
+                lead.last_message_at = datetime.datetime.utcnow()
+                if lead.status == "new":
+                    lead.status = "contacted"
+
+                print(f"Auto-replied to {lead.name}: {reply_text[:60]}...")
+
+            # Mark incoming message as auto-replied
+            msg.is_auto_replied = True
+
+        db.commit()
+    except Exception as e:
+        print(f"Unread processing error: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 def process_followups():
@@ -59,7 +167,6 @@ def process_followups():
                 fup.is_active = False
                 continue
 
-            # Get last message for context
             last_msg = (
                 db.query(Message)
                 .filter(Message.lead_id == lead.id)
@@ -67,7 +174,6 @@ def process_followups():
                 .first()
             )
 
-            # Generate follow-up message
             if fup.message_template:
                 message = fup.message_template.replace("{name}", lead.name)
             else:
@@ -77,10 +183,8 @@ def process_followups():
                     last_message=last_msg.content if last_msg else "",
                 )
 
-            # Send via WhatsApp
             result = send_whatsapp_message(lead.phone, message)
 
-            # Log message
             msg = Message(
                 lead_id=lead.id,
                 direction="out",
@@ -88,15 +192,18 @@ def process_followups():
                 content=message,
                 status="sent" if result.get("success") else "failed",
                 wa_message_id=result.get("message_id", ""),
+                is_read=True,
             )
             db.add(msg)
 
-            # Update follow-up schedule
             fup.followups_sent += 1
             fup.next_followup_at = now + datetime.timedelta(hours=fup.frequency_hours)
 
             if fup.followups_sent >= fup.max_followups:
                 fup.is_active = False
+
+            # Update lead last_message_at
+            lead.last_message_at = datetime.datetime.utcnow()
 
             print(f"Follow-up sent to {lead.name} ({lead.phone}) - #{fup.followups_sent}")
 
@@ -116,7 +223,6 @@ def create_followup_schedule(
     message_template: str = None,
 ) -> FollowUpSchedule:
     """Create a new follow-up schedule for a lead."""
-    # Deactivate existing schedules for this lead
     existing = (
         db.query(FollowUpSchedule)
         .filter(FollowUpSchedule.lead_id == lead_id, FollowUpSchedule.is_active == True)

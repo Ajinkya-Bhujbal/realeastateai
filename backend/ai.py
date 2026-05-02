@@ -1,6 +1,7 @@
 """
 AI module - Ollama integration with Phi-3 mini.
 Generates auto-replies, follow-up messages, and lead summaries.
+Uses RAG knowledge base for context-aware responses.
 Runs fully on CPU, uses GPU if available.
 """
 import os
@@ -34,10 +35,7 @@ def list_models() -> list:
 
 
 def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300) -> str:
-    """
-    Generate text using Ollama.
-    Keeps prompts short for low RAM usage.
-    """
+    """Generate text using Ollama. Keeps prompts short for low RAM usage."""
     try:
         r = requests.post(
             f"{OLLAMA_URL}/api/generate",
@@ -116,6 +114,44 @@ Message: {incoming_message[:200]}
 
 Reply (be helpful, professional, brief):"""
     return generate(prompt, max_tokens=150)
+
+
+def generate_rag_reply(
+    incoming_message: str,
+    lead_name: str,
+    lead_context: str = "",
+    kb_results: list = None,
+    property_results: list = None,
+) -> str:
+    """
+    Generate an AI reply using RAG context from knowledge base + properties.
+    This is the primary auto-reply function for incoming WhatsApp messages.
+    """
+    # Build knowledge context
+    kb_context = ""
+    if kb_results:
+        kb_snippets = []
+        for r in kb_results[:3]:
+            kb_snippets.append(r.get("text", "")[:200])
+        kb_context = "\n".join(kb_snippets)
+
+    # Build property context
+    prop_context = ""
+    if property_results:
+        for p in property_results[:2]:
+            prop_context += f"- {p.get('title', '')} in {p.get('location', '')}, Rs {p.get('price', '')}L\n"
+
+    prompt = f"""You are a helpful real estate agent assistant. Reply to this WhatsApp message in 2-4 lines.
+Use the knowledge base and property info below if relevant. Be natural and conversational.
+
+From: {lead_name}
+Message: {incoming_message[:200]}
+{f'Lead info: {lead_context[:150]}' if lead_context else ''}
+{f'Knowledge base:{chr(10)}{kb_context[:400]}' if kb_context else ''}
+{f'Available properties:{chr(10)}{prop_context[:300]}' if prop_context else ''}
+
+Reply (helpful, warm, brief WhatsApp style):"""
+    return generate(prompt, max_tokens=200)
 
 
 def summarize_lead(lead_data: dict) -> str:

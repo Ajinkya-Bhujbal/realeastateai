@@ -21,6 +21,10 @@ class Lead(Base):
     preferred_location = Column(String(300), nullable=True)
     property_type = Column(String(50), nullable=True)  # apartment, villa, plot
     notes = Column(Text, nullable=True)
+    # Chat tracking
+    last_message_at = Column(DateTime, nullable=True)
+    unread_count = Column(Integer, default=0)
+    auto_reply_enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -37,6 +41,8 @@ class Message(Base):
     channel = Column(String(20), default="whatsapp")  # whatsapp, email, sms
     content = Column(Text, nullable=False)
     status = Column(String(20), default="sent")  # sent, delivered, read, failed
+    is_read = Column(Boolean, default=False)  # has agent seen this message
+    is_auto_replied = Column(Boolean, default=False)  # was auto-reply sent for this
     wa_message_id = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
