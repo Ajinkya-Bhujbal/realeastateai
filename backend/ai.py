@@ -3,12 +3,13 @@ AI module - Ollama integration with Phi-3 mini.
 Generates auto-replies, follow-up messages, and lead summaries.
 Runs fully on CPU, uses GPU if available.
 """
+import os
 import requests
 import json
 from typing import Optional
 
-OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "phi3:mini"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
 
 
 def check_ollama() -> bool:

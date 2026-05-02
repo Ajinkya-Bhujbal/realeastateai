@@ -4,6 +4,11 @@ FastAPI single app with all endpoints.
 """
 import sys
 import os
+
+# Load .env BEFORE any other imports so all modules see the env vars
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 import datetime
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -61,8 +66,8 @@ class EmailParseRequest(BaseModel):
     sender: str = ""
 
 class GmailFetchRequest(BaseModel):
-    gmail_user: str
-    gmail_app_password: str
+    gmail_user: Optional[str] = None
+    gmail_app_password: Optional[str] = None
     max_emails: int = 20
 
 class SendMessageRequest(BaseModel):
@@ -359,8 +364,12 @@ def parse_and_save_email(req: EmailParseRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/gmail/fetch")
 def fetch_from_gmail(req: GmailFetchRequest, db: Session = Depends(get_db)):
-    """Fetch leads from Gmail inbox."""
-    leads = fetch_gmail_leads(req.gmail_user, req.gmail_app_password, req.max_emails)
+    """Fetch leads from Gmail inbox. Credentials fall back to .env if not provided."""
+    gmail_user = req.gmail_user or os.getenv("GMAIL_USER", "")
+    gmail_pass = req.gmail_app_password or os.getenv("GMAIL_APP_PASSWORD", "")
+    if not gmail_user or not gmail_pass:
+        raise HTTPException(status_code=400, detail="Gmail credentials not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in .env or provide in request.")
+    leads = fetch_gmail_leads(gmail_user, gmail_pass, req.max_emails)
     created = 0
     skipped = 0
     for parsed in leads:
@@ -787,4 +796,6 @@ def dashboard_stats(db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    host = os.getenv("SERVER_HOST", "0.0.0.0")
+    port = int(os.getenv("SERVER_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -23,6 +23,9 @@ data/leads.db
 data/chroma_db/
 *.sqlite3
 
+# Secrets
+.env
+
 # OS generated files
 .DS_Store
 .DS_Store?

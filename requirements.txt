@@ -6,3 +6,4 @@ requests
 apscheduler
 chromadb
 sentence-transformers
+python-dotenv
