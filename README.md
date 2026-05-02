@@ -337,15 +337,61 @@ python main.py
 - Search properties using natural language: *"3BHK apartment in Whitefield under 100 lakhs"*
 - Results show relevance scores based on semantic similarity
 
-### Messages
-- Select a lead to view conversation history
-- Type and send WhatsApp messages
-- Click **🤖 AI** to generate an AI reply automatically
+### Messages (WhatsApp Web-style)
+The Messages view is a full **WhatsApp Web-style chat interface**:
+
+- **Left panel** — Contact list sorted by last message time, with:
+  - Avatar (initials), name, last message preview
+  - Unread message count badge (green circle)
+  - 🤖 icon showing auto-reply is enabled
+  - Search bar to filter contacts
+- **Right panel** — Chat area with:
+  - Message bubbles (outgoing = right/blue, incoming = left/dark)
+  - Date dividers between message groups
+  - Timestamps on each message
+  - Auto-reply toggle (🤖 button in header) — ON/OFF per lead
+- **Input bar** — Type message + Send, or click 🤖 to generate AI reply
+- **Simulate button** (📩) — Test incoming messages without real WhatsApp webhook
+- **Real-time polling** — UI refreshes every 3 seconds for new messages
+
+**Auto-reply flow:**
+1. Incoming message arrives (via webhook or simulate)
+2. System checks knowledge base + properties for relevant context
+3. Ollama generates a contextual reply using RAG
+4. Reply is sent via WhatsApp automatically (if auto-reply is ON)
 
 ### AI Tools
+- **AI Status** — Check if Ollama is running and which models are loaded
+- **Knowledge Base** — View indexed files, click "Index Knowledge Base" to re-index
 - **Parse Email** — Paste a real estate email and extract lead info automatically
-- **RAG Search** — Search properties with AI-powered semantic matching
+- **RAG Search** — Search the knowledge base with AI-powered semantic matching
 - **Follow-up** — Schedule automated follow-ups (frequency in hours, max count)
+
+---
+
+## 📚 Knowledge Base (RAG)
+
+The system uses a **knowledge base** to generate smarter AI replies. When a lead asks a question, the AI searches your knowledge base for relevant info and includes it in the response.
+
+### Adding Knowledge Base Files
+
+1. Place `.txt` or `.md` files in the `data/knowledge_base/` folder
+2. Go to **AI Tools** → click **"Index Knowledge Base"**
+3. Files are split into chunks, embedded, and stored in ChromaDB
+
+### Sample Files Included
+
+| File | Content |
+|------|---------|
+| `about_company.txt` | Company info, services, working hours |
+| `pricing_faq.txt` | Common pricing questions, costs, documents needed |
+| `localities.txt` | Bangalore locality guide with price ranges |
+
+### Tips for Good Knowledge Base Files
+- Write in clear Q&A or structured format
+- Include specific details: prices, locations, builder names
+- Keep files focused on one topic each
+- Update and re-index whenever information changes
 
 ---
 
@@ -367,7 +413,18 @@ python main.py
 | `POST`   | `/api/parse-email/save`   | Parse email, save as lead      |
 | `POST`   | `/api/gmail/fetch`        | Fetch leads from Gmail inbox   |
 
-### Messaging
+### Chat (WhatsApp Web)
+| Method   | Endpoint                              | Description                    |
+|----------|---------------------------------------|--------------------------------|
+| `GET`    | `/api/chats`                          | List all conversations (sidebar) |
+| `GET`    | `/api/chats/{lead_id}`                | Get full chat history          |
+| `POST`   | `/api/chats/{lead_id}/send`           | Send a message                 |
+| `POST`   | `/api/chats/{lead_id}/read`           | Mark all messages as read      |
+| `POST`   | `/api/chats/{lead_id}/toggle-auto-reply` | Toggle auto-reply ON/OFF    |
+| `GET`    | `/api/chats/unread-count`             | Total unread across all leads  |
+| `POST`   | `/api/chats/simulate-incoming`        | Simulate incoming message (test) |
+
+### Messaging (Legacy)
 | Method   | Endpoint                  | Description                    |
 |----------|---------------------------|--------------------------------|
 | `POST`   | `/api/messages/send`      | Send WhatsApp message          |
@@ -381,6 +438,13 @@ python main.py
 | `POST`   | `/api/ai/reply`           | Generate AI reply for lead     |
 | `POST`   | `/api/ai/recommend`       | AI property recommendation     |
 | `GET`    | `/api/ai/status`          | Check Ollama status            |
+
+### Knowledge Base
+| Method   | Endpoint                  | Description                    |
+|----------|---------------------------|--------------------------------|
+| `POST`   | `/api/kb/index`           | Index all KB files             |
+| `GET`    | `/api/kb/status`          | KB file count + chunks indexed |
+| `POST`   | `/api/kb/search`          | Semantic search the KB         |
 
 ### Properties
 | Method   | Endpoint                       | Description                 |
@@ -410,20 +474,24 @@ python main.py
 ```
 real-estate-leads/
 ├── backend/
-│   ├── main.py          # FastAPI app — all endpoints
+│   ├── main.py          # FastAPI app — all endpoints (including Chat & KB APIs)
 │   ├── db.py            # SQLAlchemy + SQLite setup
 │   ├── models.py        # Database models (Lead, Message, Property, FollowUp)
 │   ├── parser.py        # Email parser (Housing.com, 99acres, MagicBricks)
-│   ├── ai.py            # Ollama AI integration (Phi-3 Mini)
-│   ├── rag.py           # ChromaDB RAG (property search)
+│   ├── ai.py            # Ollama AI + RAG-powered reply generation
+│   ├── rag.py           # ChromaDB RAG (property search + knowledge base)
 │   ├── whatsapp.py      # WhatsApp Business API integration
-│   └── followup.py      # APScheduler follow-up automation
+│   └── followup.py      # APScheduler: follow-ups + auto-reply processor
 ├── frontend/
-│   ├── index.html       # Dashboard UI
+│   ├── index.html       # Dashboard UI (WhatsApp Web-style Messages view)
 │   ├── style.css        # Dark mode design system
-│   └── app.js           # Frontend JavaScript
+│   └── app.js           # Frontend JS (ChatManager with 3s polling)
 ├── data/
 │   ├── properties.json  # 15 sample Indian properties
+│   ├── knowledge_base/  # RAG knowledge base (.txt and .md files)
+│   │   ├── about_company.txt
+│   │   ├── pricing_faq.txt
+│   │   └── localities.txt
 │   ├── leads.db         # SQLite database (auto-created)
 │   └── chroma_db/       # Vector store (auto-created)
 ├── .env.example         # Environment variable template
