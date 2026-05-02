@@ -26,7 +26,7 @@ async function api(path, opts = {}) {
         });
         return await r.json();
     } catch (e) {
-        toast('API Error: ' + e.message, 'error');
+        if (!opts.silent) toast('API Error: ' + e.message, 'error');
         return null;
     }
 }
@@ -78,7 +78,7 @@ $('menu-toggle').addEventListener('click', () => { $('sidebar').classList.toggle
 
 // ─── Dashboard ──────────────────────
 async function loadDashboard() {
-    const d = await api('/api/dashboard/stats');
+    const d = await api('/api/dashboard/stats', { silent: true });
     if (!d) return;
     $('stat-total').textContent = d.total_leads;
     $('stat-new').textContent = d.new_leads;
@@ -226,7 +226,7 @@ async function searchPropertiesUI() {
 // ═══════════════════════════════════════════════════
 
 async function loadChats() {
-    const d = await api('/api/chats');
+    const d = await api('/api/chats', { silent: true });
     if (!d) return;
     const list = $('wa-contact-list');
 
@@ -386,7 +386,7 @@ function startChatPolling() {
         await loadChats();
         // If a chat is open, refresh messages
         if (currentLeadId) {
-            const d = await api(`/api/chats/${currentLeadId}`);
+            const d = await api(`/api/chats/${currentLeadId}`, { silent: true });
             if (d && d.messages) {
                 const box = $('wa-messages');
                 const currentCount = box.querySelectorAll('.wa-msg-bubble').length;
@@ -443,7 +443,7 @@ $('btn-create-followup').addEventListener('click', async () => {
 
 // ─── AI Status ──────────────────────
 async function checkAI() {
-    const d = await api('/api/ai/status');
+    const d = await api('/api/ai/status', { silent: true });
     const el = $('ai-status-detail');
     const dot = $('ai-dot');
     const txt = $('ai-status-text');
