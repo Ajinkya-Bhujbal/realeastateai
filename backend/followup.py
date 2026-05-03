@@ -44,7 +44,7 @@ def start_scheduler():
         if gmail_user and gmail_pass:
             scheduler.add_job(
                 process_email_leads,
-                trigger=IntervalTrigger(minutes=1),
+                trigger=IntervalTrigger(seconds=30),
                 id="email_poller",
                 replace_existing=True,
                 next_run_time=datetime.datetime.now(),  # Run immediately on startup
@@ -273,14 +273,21 @@ def process_email_leads():
 
     db = SessionLocal()
     try:
-        leads = fetch_gmail_leads(gmail_user, gmail_pass, max_emails=10)
+        # fetch_gmail_leads is now a generator yielding leads newest-first
+        lead_generator = fetch_gmail_leads(gmail_user, gmail_pass, max_emails=None)
         created = 0
         skipped = 0
+        consecutive_duplicates = 0
 
-        for parsed in leads:
+        for parsed in lead_generator:
             name = parsed.get("name", "").strip() or "Unknown"
             phone = parsed.get("phone", "").strip()
             lead_email = parsed.get("email", "").strip()
+
+            # Skip junk emails that have no contact info
+            if not phone and not lead_email:
+                skipped += 1
+                continue
 
             # Dedup: check if lead with same phone or email already exists
             existing = None
@@ -291,7 +298,14 @@ def process_email_leads():
 
             if existing:
                 skipped += 1
+                consecutive_duplicates += 1
+                # If we hit 20 consecutive duplicates, assume we've reached already-parsed history
+                if consecutive_duplicates >= 20:
+                    print(f"Email poller: Reached known history. Stopping early after {created} created, {skipped} skipped.")
+                    break
                 continue
+            
+            consecutive_duplicates = 0
 
             lead = Lead(
                 name=name,
@@ -303,14 +317,19 @@ def process_email_leads():
                 budget_max=parsed.get("budget_max"),
                 preferred_location=parsed.get("preferred_location", ""),
                 property_type=parsed.get("property_type", ""),
+                configuration=parsed.get("configuration", ""),
+                price=parsed.get("price", ""),
                 notes=parsed.get("notes", "")[:500],
             )
+            # Use email received time instead of current time
+            if parsed.get("received_at"):
+                lead.created_at = parsed["received_at"]
             db.add(lead)
+            db.commit()  # Commit immediately so UI updates live
             created += 1
 
-        db.commit()
-        if created > 0:
-            print(f"Email poller: {created} new leads created, {skipped} duplicates skipped")
+        if created > 0 or skipped > 0:
+            print(f"Email poller finished loop: {created} new leads created, {skipped} duplicates skipped")
     except Exception as e:
         print(f"Email polling error: {e}")
         db.rollback()

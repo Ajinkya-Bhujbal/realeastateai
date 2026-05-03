@@ -184,7 +184,7 @@ This is a **step-by-step guide** to get your WhatsApp API credentials. It's free
 
 1. Go to **https://developers.facebook.com/apps/**
 2. Click **"Create App"**
-3. Select **"Other"** → Click Next
+3. Select **"Other"** → Click Next (If prompted for Use Cases, select **"Connect with customers through WhatsApp"**)
 4. Select **"Business"** → Click Next
 5. Fill in:
    - **App name:** `LeadPilot` (or any name)
@@ -193,18 +193,21 @@ This is a **step-by-step guide** to get your WhatsApp API credentials. It's free
 
 #### 3. Add WhatsApp to Your App
 
-1. On the app dashboard, scroll to **"Add products to your app"**
-2. Find **"WhatsApp"** and click **"Set Up"**
-3. If prompted, create a new **Meta Business Account** or select an existing one
+*Note: Meta frequently updates their dashboard. If you don't see an "Add products" section, follow these steps:*
+
+1. On the app dashboard, look for the **"App customization and requirements"** section and click **"Customize the Connect with customers through WhatsApp use case"**.
+   *(Alternatively, click on **"Use cases"** in the left sidebar and add WhatsApp).*
+2. Follow the on-screen prompts. If asked, create a new **Meta Business Account** or select an existing one.
+3. Once completed, a **"WhatsApp"** menu item will appear in the left sidebar.
 
 #### 4. Get Your Credentials
 
-After setup, you'll be on the WhatsApp **"API Setup"** page:
+After setup, expand the **"WhatsApp"** menu in the left sidebar and click on **"API Setup"**:
 
 1. **Temporary Access Token** — Copy this. It's your `WA_ACCESS_TOKEN`
    > ⚠️ This token expires in 24 hours. For production, generate a permanent token (see below).
 
-2. **Phone Number ID** — Under "From", you'll see a test phone number. The **Phone number ID** shown below it is your `WA_PHONE_NUMBER_ID`
+2. **Phone Number ID** — Under "Step 1: Select phone numbers", you'll see a test phone number. The **Phone number ID** shown below it is your `WA_PHONE_NUMBER_ID`
 
 3. **Test Phone Number** — Meta provides a free test phone number. You can send messages FROM this number.
 
@@ -329,8 +332,10 @@ python main.py
 
 ### Leads
 - Search, filter by status (New / Contacted / Interested / Converted / Lost)
-- Filter by source (Housing.com / 99acres / MagicBricks / Manual)
-- Add leads manually or via email parsing
+- **Tags** — Assign custom tags like "Visited", "Interested", "Not Interested" or create your own custom tags via the dropdown.
+- **Source Filtering** — Housing.com / 99acres / MagicBricks / Manual
+- **Auto-Extraction** — The system automatically extracts **Price**, **Location**, and **Flat Configuration** (e.g., 1BHK, 2BHK) from incoming emails.
+- Add leads manually or via automated Gmail polling (refreshes every 1 minute).
 
 ### Properties
 - Click **"Index Samples"** to load 15 sample Indian properties into the RAG engine
@@ -412,6 +417,8 @@ The system uses a **knowledge base** to generate smarter AI replies. When a lead
 | `POST`   | `/api/parse-email`        | Parse email, return data       |
 | `POST`   | `/api/parse-email/save`   | Parse email, save as lead      |
 | `POST`   | `/api/gmail/fetch`        | Fetch leads from Gmail inbox   |
+
+*Note: The email parser extracts hidden phone numbers by automatically following housing.com redirects. It also extracts configuration (e.g., "2 BHK") and budget/pricing details directly from the email body. The background poller uses a streaming generator to live-ingest thousands of historical emails with a smart early-exit strategy for duplicates.*
 
 ### Chat (WhatsApp Web)
 | Method   | Endpoint                              | Description                    |

@@ -20,6 +20,9 @@ class Lead(Base):
     budget_max = Column(Float, nullable=True)
     preferred_location = Column(String(300), nullable=True)
     property_type = Column(String(50), nullable=True)  # apartment, villa, plot
+    configuration = Column(String(50), nullable=True)  # 1 BHK, 2 BHK, etc.
+    price = Column(String(50), nullable=True)  # parsed string like Rs 5200000 or ₹ 18.0k
+    tag = Column(String(100), default="NEW")  # NEW, visited, interested, not interested, or custom
     notes = Column(Text, nullable=True)
     # Chat tracking
     last_message_at = Column(DateTime, nullable=True)

@@ -132,6 +132,7 @@ body { font-family: 'Inter', sans-serif; background: var(--bg-primary); color: v
 .data-table td { padding: 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
 .data-table tr:hover { background: var(--bg-hover); }
 .source-badge { font-size: 11px; padding: 2px 8px; background: var(--bg-input); border-radius: 4px; color: var(--text-secondary); }
+.tag-select { padding: 4px 8px; font-size: 11px; width: 110px; border-radius: 4px; background: var(--bg-card); cursor: pointer; }
 .action-btns { display: flex; gap: 4px; }
 .action-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
 .action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }

@@ -35,12 +35,18 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s || 
 
 function timeAgo(iso) {
     if (!iso) return '';
-    const d = new Date(iso + (iso.includes('Z') ? '' : 'Z'));
+    // Ensure we treat the timestamp as UTC
+    let dateStr = iso;
+    if (!dateStr.includes('Z') && !dateStr.includes('+')) dateStr += 'Z';
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '';
     const s = Math.floor((Date.now() - d) / 1000);
-    if (s < 60) return 'just now';
+    if (s < 0) return 'just now';
+    if (s < 60) return s + 's ago';
     if (s < 3600) return Math.floor(s / 60) + 'm ago';
     if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-    return Math.floor(s / 86400) + 'd ago';
+    if (s < 604800) return Math.floor(s / 86400) + 'd ago';
+    return d.toLocaleDateString();
 }
 
 function formatTime(iso) {
@@ -119,15 +125,26 @@ async function loadLeads() {
     const d = await api(url);
     if (!d) return;
     const tb = $('leads-tbody');
-    if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="7" class="empty-state">No leads found</td></tr>'; return; }
+    if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="8" class="empty-state">No leads found</td></tr>'; return; }
     tb.innerHTML = d.leads.map(l => `
         <tr>
             <td><strong>${esc(l.name)}</strong>${l.email ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(l.email) + '</span>' : ''}</td>
             <td>${esc(l.phone || '-')}</td>
             <td><span class="source-badge">${l.source}</span></td>
-            <td><span class="badge badge-${l.status}">${l.status}</span></td>
-            <td>${l.budget_min || l.budget_max ? (l.budget_min || '?') + '-' + (l.budget_max || '?') + 'L' : '-'}</td>
+            <td>${esc(l.configuration || l.property_type || '-')}</td>
+            <td>${esc(l.price || (l.budget_min || l.budget_max ? (l.budget_min || '?') + '-' + (l.budget_max || '?') + 'L' : '-'))}</td>
             <td>${esc(l.preferred_location || '-')}</td>
+            <td class="time-ago-cell" data-created="${l.created_at || ''}" style="font-size:12px;color:var(--text-secondary)">${timeAgo(l.created_at)}</td>
+            <td>
+                <select class="input tag-select" onchange="updateTag(${l.id}, this)">
+                    <option value="NEW" ${l.tag === 'NEW' ? 'selected' : ''}>NEW</option>
+                    <option value="visited" ${l.tag === 'visited' ? 'selected' : ''}>Visited</option>
+                    <option value="interested" ${l.tag === 'interested' ? 'selected' : ''}>Interested</option>
+                    <option value="not interested" ${l.tag === 'not interested' ? 'selected' : ''}>Not Interested</option>
+                    ${!['NEW', 'visited', 'interested', 'not interested'].includes(l.tag || 'NEW') ? `<option value="${esc(l.tag)}" selected>${esc(l.tag)}</option>` : ''}
+                    <option value="_custom">+ Custom Tag...</option>
+                </select>
+            </td>
             <td class="action-btns">
                 <button class="action-btn" onclick="viewLead(${l.id})">View</button>
                 <button class="action-btn delete" onclick="deleteLead(${l.id})">Del</button>
@@ -151,6 +168,30 @@ window.deleteLead = async function (id) {
     await api(`/api/leads/${id}`, { method: 'DELETE' });
     toast('Lead deleted');
     loadLeads();
+};
+
+window.updateTag = async function (id, selectEl) {
+    let tagValue = selectEl.value;
+    if (tagValue === '_custom') {
+        const customTag = prompt('Enter custom tag name:');
+        if (!customTag || !customTag.trim()) {
+            selectEl.value = 'NEW'; // reset
+            return;
+        }
+        tagValue = customTag.trim();
+        // Add new option and select it
+        const opt = document.createElement('option');
+        opt.value = tagValue;
+        opt.text = tagValue;
+        selectEl.add(opt, selectEl.options[selectEl.options.length - 1]);
+        selectEl.value = tagValue;
+    }
+    
+    await api(`/api/leads/${id}`, {
+        method: 'PUT',
+        body: { tag: tagValue }
+    });
+    toast('Tag updated');
 };
 
 // ─── Add Lead Modal ──────────────────────
@@ -461,3 +502,28 @@ async function checkAI() {
 // ─── Init ──────────────────────
 loadDashboard();
 checkAI();
+
+// ─── Background Polling ──────────────────
+// Refresh dashboard and leads automatically every 15 seconds
+setInterval(() => {
+    if ($('view-dashboard').classList.contains('active')) {
+        loadDashboard();
+    }
+    if ($('view-leads').classList.contains('active')) {
+        loadLeads();
+    }
+}, 15000);
+
+// ─── Live Time-Ago Updater ──────────────────────
+// Updates all time-ago cells every 5 seconds so they stay current
+setInterval(() => {
+    document.querySelectorAll('.time-ago-cell[data-created]').forEach(cell => {
+        const created = cell.getAttribute('data-created');
+        if (created) cell.textContent = timeAgo(created);
+    });
+    // Also update dashboard recent leads
+    document.querySelectorAll('.recent-lead-meta').forEach(meta => {
+        const text = meta.textContent;
+        // These get refreshed on dashboard reload, no action needed here
+    });
+}, 5000);

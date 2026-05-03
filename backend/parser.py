@@ -27,6 +27,8 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
         "budget_max": None,
         "preferred_location": "",
         "property_type": "",
+        "configuration": "",
+        "price": "",
         "notes": "",
     }
 
@@ -48,6 +50,28 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
 
     # Notes = trimmed raw body
     result["notes"] = body[:500] if body else ""
+
+    # Generic extractions for configuration and price
+    combined = (subject + " " + body + " " + html_body).replace("\n", " ")
+    
+    # Extract Configuration (e.g., 1BHK, 2BHK, 3BHK)
+    if not result.get("configuration"):
+        config_match = re.search(r'([1-4])\s*BHK', combined, re.IGNORECASE)
+        if config_match:
+            result["configuration"] = f"{config_match.group(1)}BHK"
+
+    # Extract Price (e.g., Rs 5200000, ₹ 18.0k, ₹ 1.2 Cr)
+    if not result.get("price"):
+        # Look for currency symbols followed by numbers and optional multipliers like k, L, Cr, Lac, Lakh
+        price_match = re.search(r'(?:Rs\.?|₹|INR)\s*([\d,.]+\s*(?:k|L|Cr|Lac|Lakhs|Crores|Lakh)?)', combined, re.IGNORECASE)
+        if price_match:
+            result["price"] = price_match.group(0).strip()
+        else:
+            # Maybe price is just mentioned with Budget: or Price:
+            price_match2 = re.search(r'(?:Price|Budget|Rent)\s*[:\-]\s*([\d,.]+\s*(?:k|L|Cr|Lac|Lakhs|Crores|Lakh)?)', combined, re.IGNORECASE)
+            if price_match2:
+                result["price"] = price_match2.group(1).strip()
+
     return result
 
 
@@ -63,7 +87,9 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
 #   "Message: I am interested in your property."
 
 def _parse_magicbricks(subject: str, body: str, html_body: str, result: dict) -> dict:
-    combined = body + "\n" + html_body
+    # Strip HTML tags to get clean text for matching
+    clean_html = _html_to_text(html_body) if html_body else ""
+    combined = body + "\n" + clean_html
 
     # Name: "Sender's Name: ajit (Individual)" or "Sender's Name: ajit"
     match = re.search(r"Sender'?s?\s*Name\s*[:\-–]\s*(.+?)(?:\(|$|\n)", combined, re.IGNORECASE)
@@ -74,12 +100,13 @@ def _parse_magicbricks(subject: str, body: str, html_body: str, result: dict) ->
         if match:
             result["name"] = match.group(1).strip().rstrip(".,")
 
-    # Phone: "Mobile: 9604092514"
+    # Phone: "Mobile: 9604092514" — now works because HTML tags are stripped
     match = re.search(r"(?:Mobile|Phone|Contact|Cell)\s*[:\-–]\s*\+?(\d[\d\s\-]{8,14})", combined, re.IGNORECASE)
     if match:
-        result["phone"] = re.sub(r"[\s\-]", "", match.group(1))[-10:]
-    else:
-        result["phone"] = extract_phone(combined)
+        phone = re.sub(r"[\s\-]", "", match.group(1))[-10:]
+        result["phone"] = phone if is_valid_indian_phone(phone) else ""
+    if not result["phone"]:
+        result["phone"] = extract_phone(combined + "\n" + (html_body or ""))
 
     # Email: "Email: ajito18@hotmail.com"
     match = re.search(r"Email\s*[:\-–]\s*([\w.+-]+@[\w-]+\.[\w.-]+)", combined, re.IGNORECASE)
@@ -94,9 +121,10 @@ def _parse_magicbricks(subject: str, body: str, html_body: str, result: dict) ->
     if match:
         prop_text = match.group(1).strip()
         # Extract BHK
-        bhk = re.search(r"(\d)\s*BHK", prop_text, re.IGNORECASE)
+        bhk = re.search(r"([1-4])\s*BHK", prop_text, re.IGNORECASE)
         if bhk:
-            result["property_type"] = f"{bhk.group(1)}BHK apartment"
+            result["configuration"] = f"{bhk.group(1)}BHK"
+            result["property_type"] = "apartment"
         else:
             result["property_type"] = extract_property_type(prop_text, subject)
         # Extract location: after "in" or "at"
@@ -131,33 +159,37 @@ def _parse_magicbricks(subject: str, body: str, html_body: str, result: dict) ->
 def _parse_99acres(subject: str, body: str, html_body: str, result: dict) -> dict:
     combined = body + "\n" + html_body
 
-    # Name: appears after "Details of the Query" — next line is the name
-    match = re.search(r"Details\s+of\s+(?:the\s+)?Query\s*[:\-]?\s*\n?\s*([A-Za-z][A-Za-z\s]{2,40})", combined, re.IGNORECASE)
-    if match:
-        result["name"] = match.group(1).strip()
-    else:
-        # Try: name on its own line (capitalized words)
-        lines = combined.split('\n')
+    # Phone: from HTML tel: links like tel:+91-8871817930
+    phone_match = re.search(r'href="tel:\+?91[\s\-]?(\d{10})"', html_body or "", re.IGNORECASE)
+    if phone_match:
+        phone = phone_match.group(1)
+        if is_valid_indian_phone(phone):
+            result["phone"] = phone
+    if not result["phone"]:
+        # Fallback: "+91-9958323859 (Verified)" in text
+        match = re.search(r"\+?91[\s\-]?(\d{10})", combined)
+        if match and is_valid_indian_phone(match.group(1)):
+            result["phone"] = match.group(1)
+    if not result["phone"]:
+        result["phone"] = extract_phone(combined)
+
+    # Name: from text body
+    if not result["name"]:
+        clean_text = _html_to_text(html_body) if html_body else body
+        lines = clean_text.split('\n')
         for i, line in enumerate(lines):
-            if "details of" in line.lower() and "query" in line.lower():
-                # Name is typically the next non-empty line
-                for j in range(i + 1, min(i + 4, len(lines))):
+            if "details of the response" in line.lower() or "details of the query" in line.lower():
+                for j in range(i + 1, min(i + 40, len(lines))):
                     name_line = lines[j].strip()
-                    if name_line and re.match(r'^[A-Za-z][A-Za-z\s]{2,40}$', name_line):
-                        result["name"] = name_line
+                    if name_line and not re.match(r'^[\+\d\-\(\)\s]+$', name_line) and "@" not in name_line and "verified" not in name_line.lower():
+                        result["name"] = name_line.split('[')[0].strip()
                         break
                 break
 
-    # Phone: "+91-9958323859 (Verified)" or "+91-XXXXXXXXXX"
-    match = re.search(r"\+?91[\s\-]?(\d{10})", combined)
-    if match:
-        result["phone"] = match.group(1)
-    else:
-        result["phone"] = extract_phone(combined)
-
     # Property + Price: "query on Rs15,000 , Flat/Apartment in Yahavi Vanaha Bavdhan Patil Nagar"
+    # Or "response on Rs21,500 , 2 BHK, Flat/Apartment in Yahavi"
     match = re.search(
-        r"query\s+on\s+(?:Rs\.?\s*)?(\d[\d,]+(?:\.\d+)?)\s*,?\s*(.+?)(?:\(|on\s+99acres|$)",
+        r"(?:query|response)\s+on\s+(?:Rs\.?\s*)?(\d[\d,]+(?:\.\d+)?)\s*,?\s*(.+?)(?:\(|on\s+99acres|$)",
         combined, re.IGNORECASE,
     )
     if match:
@@ -173,9 +205,10 @@ def _parse_99acres(subject: str, body: str, html_body: str, result: dict) -> dic
             result["budget_max"] = result["budget_min"]
 
         # Property type from text like "Flat/Apartment in Yahavi..."
-        bhk = re.search(r"(\d)\s*BHK", prop_text, re.IGNORECASE)
+        bhk = re.search(r"([1-4])\s*BHK", prop_text, re.IGNORECASE)
         if bhk:
-            result["property_type"] = f"{bhk.group(1)}BHK apartment"
+            result["configuration"] = f"{bhk.group(1)}BHK"
+            result["property_type"] = "apartment"
         elif "flat" in prop_text.lower() or "apartment" in prop_text.lower():
             result["property_type"] = "apartment"
         else:
@@ -190,8 +223,17 @@ def _parse_99acres(subject: str, body: str, html_body: str, result: dict) -> dic
     email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", combined)
     if email_match:
         found = email_match.group(0).lower()
-        if "99acres" not in found:
+        if "99acres" not in found and "ravindrabhujbal" not in found: # avoid agent email in tracker url
             result["email"] = found
+    
+    # Check text body specifically for email since combined has tracking URLs
+    if not result.get("email") or "ravindrabhujbal" in result["email"]:
+        clean_text = _html_to_text(html_body) if html_body else body
+        email_match2 = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", clean_text)
+        if email_match2:
+            found = email_match2.group(0).lower()
+            if "99acres" not in found:
+                result["email"] = found
 
     if not result["property_type"]:
         result["property_type"] = extract_property_type(combined, subject)
@@ -213,38 +255,118 @@ def _parse_99acres(subject: str, body: str, html_body: str, result: dict) -> dic
 #   "₹ 18.0k"
 #
 # Phone is HIDDEN in HTML links: wa.me/91XXXXXXXXXX or tel:+91XXXXXXXXXX
+# Solution: follow the hsng.co redirect URLs to get the actual phone number
+
+
+def _follow_housing_redirect(html_body: str) -> str:
+    """Follow Housing.com's hsng.co redirect URLs to extract lead phone number.
+    
+    The redirect chain is:
+      awstrack.me/L0/https://hsng.co/HOUSNG/xxx/...
+        -> pahal.housing.com/lead/cta/number?phone=+91XXXXXXXXXX
+        -> or api.whatsapp.com/send?phone=+91XXXXXXXXXX
+    
+    We extract the inner hsng.co URL and follow it to get the phone.
+    """
+    from urllib.request import urlopen, Request
+    from urllib.parse import unquote
+    
+    # Extract inner hsng.co URLs from the awstrack.me tracking wrappers
+    # This avoids hitting the awstrack.me server (which often returns 400)
+    awstrack_urls = re.findall(r'href="([^"]*awstrack[^"]*HOUSNG[^"]*)"', html_body, re.IGNORECASE)
+    redirect_urls = []
+    for aw_url in awstrack_urls:
+        match = re.search(r'/L0/(https?[^/]+)/1/', aw_url)
+        if match:
+            redirect_urls.append(unquote(match.group(1)))
+    
+    # Fallback: direct hsng.co URLs
+    if not redirect_urls:
+        redirect_urls = re.findall(r'href="(https?://hsng\.co/HOUSNG/[^"]*)"', html_body, re.IGNORECASE)
+    
+    # Try URLs until we find a phone
+    for rurl in redirect_urls:
+        try:
+            req = Request(rurl, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            resp = urlopen(req, timeout=4)
+            final_url = resp.geturl()
+            
+            # Extract phone from final URL
+            phone_match = re.search(r'phone=(?:%2B|\+)?(\d{10,13})', final_url)
+            if not phone_match:
+                phone_match = re.search(r'wa\.me/(\d{10,13})', final_url)
+            
+            if phone_match:
+                phone = phone_match.group(1)[-10:]
+                if is_valid_indian_phone(phone):
+                    return phone
+        except Exception as e:
+            # Check error message just in case
+            err_str = str(e)
+            phone_match = re.search(r'phone=(?:%2B|\+)?(\d{10,13})', err_str)
+            if phone_match:
+                phone = phone_match.group(1)[-10:]
+                if is_valid_indian_phone(phone):
+                    return phone
+    
+    return ""
 
 def _parse_housing(subject: str, body: str, html_body: str, result: dict) -> dict:
     combined = body + "\n" + html_body
 
-    # Name: "Name: Upasana Satpathy" or from subject "Upasana Satpathy would like to talk"
-    match = re.search(r"Name\s*[:\-–]\s*([A-Za-z][A-Za-z ]{2,40})", combined, re.IGNORECASE)
-    if match:
-        result["name"] = match.group(1).strip()
-    else:
+    # Name: from HTML: <div>Name:</div>...<div style="...bold">Priya</div>
+    if html_body:
+        # Pattern: Name: label followed by bold div with the actual name
+        name_match = re.search(r'Name:\s*</div>\s*</td>\s*<td>\s*<div[^>]*>\s*([A-Za-z][A-Za-z\s]{1,40})\s*</div>', html_body, re.IGNORECASE)
+        if name_match:
+            result["name"] = name_match.group(1).strip()
+    # Fallback: from header text "Priya would like to talk to you"
+    if not result["name"]:
+        match = re.search(r"([A-Za-z][A-Za-z\s]{1,40})\s+would\s+like\s+to\s+talk", html_body or combined, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            if name.lower() not in ('a user', 'someone', 'buyer'):
+                result["name"] = name
+    # Fallback: from subject
+    if not result["name"]:
         match = re.search(r"^(.+?)\s+would\s+like\s+to\s+talk", subject, re.IGNORECASE)
         if match:
             result["name"] = match.group(1).strip()
+    # Fallback: "Name: X" in text
+    if not result["name"]:
+        match = re.search(r"Name\s*[:\-]\s*([A-Za-z][A-Za-z ]{1,40})", combined, re.IGNORECASE)
+        if match:
+            result["name"] = match.group(1).strip()
 
-    # Phone: MUST extract from HTML links
-    # Look for: wa.me/91XXXXXXXXXX, tel:+91XXXXXXXXXX, api.whatsapp.com/send?phone=91XXXXXXXXXX
+    # Phone: Housing.com hides phone behind redirect URLs (hsng.co/HOUSNG/...)
+    # Strategy: find hsng.co URLs in HTML, follow redirects to get final wa.me or tel URL
     phone_found = False
     if html_body:
-        # WhatsApp link: wa.me/91XXXXXXXXXX or api.whatsapp.com/send?phone=91XXXXXXXXXX
+        # First: try direct wa.me or tel links (in case they exist)
         wa_match = re.search(r"wa\.me/(\d{10,13})", html_body)
         if not wa_match:
             wa_match = re.search(r"api\.whatsapp\.com/send\?phone=(\d{10,13})", html_body)
         if wa_match:
-            phone = wa_match.group(1)
-            # Strip country code
-            result["phone"] = phone[-10:]
-            phone_found = True
+            phone = wa_match.group(1)[-10:]
+            if is_valid_indian_phone(phone):
+                result["phone"] = phone
+                phone_found = True
 
-        # Tel link: tel:+91XXXXXXXXXX
         if not phone_found:
             tel_match = re.search(r"tel:\+?(\d{10,13})", html_body)
             if tel_match:
-                result["phone"] = tel_match.group(1)[-10:]
+                phone = tel_match.group(1)[-10:]
+                if is_valid_indian_phone(phone):
+                    result["phone"] = phone
+                    phone_found = True
+
+        # Follow hsng.co redirect URLs to get the phone number
+        if not phone_found:
+            phone = _follow_housing_redirect(html_body)
+            if phone:
+                result["phone"] = phone
                 phone_found = True
 
         # Mailto link for email
@@ -253,9 +375,6 @@ def _parse_housing(subject: str, body: str, html_body: str, result: dict) -> dic
             found = mailto_match.group(1).lower()
             if "housing.com" not in found:
                 result["email"] = found
-
-    if not phone_found:
-        result["phone"] = extract_phone(combined)
 
     # Email fallback
     if not result["email"]:
@@ -267,21 +386,31 @@ def _parse_housing(subject: str, body: str, html_body: str, result: dict) -> dic
         prop_text = match.group(1).strip()
         bhk = re.search(r"(\d)\s*BHK", prop_text, re.IGNORECASE)
         if bhk:
-            result["property_type"] = f"{bhk.group(1)}BHK apartment"
+            result["configuration"] = f"{bhk.group(1)} BHK"
+            result["property_type"] = "apartment"
         else:
             result["property_type"] = extract_property_type(prop_text, subject)
     else:
         bhk = re.search(r"(\d)\s*BHK", combined, re.IGNORECASE)
         if bhk:
-            result["property_type"] = f"{bhk.group(1)}BHK apartment"
+            result["configuration"] = f"{bhk.group(1)} BHK"
+            result["property_type"] = "apartment"
 
     # Location: project name + area (e.g., "Shapoorji Palonji Vanaha Bavdhan")
     # Appears after BHK line in the property card
-    match = re.search(r"(?:\d\s*BHK\s+Apartment\s*\n?\s*)([A-Za-z][A-Za-z\s]+(?:Bavdhan|Nagar|Road|Colony|Society|Layout|Phase|Park|Enclave|Heights|Tower|Residency|City)[A-Za-z\s]*)", combined, re.IGNORECASE)
+    match = re.search(r"(?:\d\s*BHK\s*Apartment\s*\n?\s*)([A-Za-z][A-Za-z\s]+(?:Bavdhan|Nagar|Road|Colony|Society|Layout|Phase|Park|Enclave|Heights|Tower|Residency|City)[A-Za-z\s]*)", combined, re.IGNORECASE)
     if match:
         result["preferred_location"] = match.group(1).strip()
     else:
-        result["preferred_location"] = extract_location(combined, subject)
+        # Fallback: Capture the line before the price
+        match = re.search(r"([A-Za-z0-9\s\-,&]+)\s*\n\s*[₹Rs\.]+\s*[\d,.]+\s*(?:k|K|lakh|lakhs|lac|lacs|cr|crore|crores)?", combined)
+        if match:
+            potential_loc = match.group(1).strip()
+            if len(potential_loc) > 3 and "BHK" not in potential_loc.upper():
+                result["preferred_location"] = potential_loc
+        
+        if not result["preferred_location"]:
+            result["preferred_location"] = extract_location(combined, subject)
 
     # Price: "₹ 18.0k" or "Rs. 18,000" or "₹ 1.5 Cr"
     match = re.search(r"[₹Rs\.]+\s*([\d,.]+)\s*(k|K|lakh|lakhs|lac|lacs|cr|crore|crores)?", combined)
@@ -356,23 +485,60 @@ def extract_name(body: str, subject: str) -> str:
     return "Unknown"
 
 
+def is_valid_indian_phone(phone: str) -> bool:
+    """Check if a 10-digit number is a valid Indian mobile number (starts with 6/7/8/9)."""
+    phone = re.sub(r"[\s\-]", "", phone)
+    if len(phone) > 10:
+        phone = phone[-10:]
+    return len(phone) == 10 and phone[0] in "6789"
+
+
+def validate_phone(raw_phone: str, has_non_indian_code: bool = False) -> str:
+    """Validate and clean a phone number.
+    If the number has a non-Indian country code (+1, +44, etc.), skip the 6/7/8/9 rule.
+    For Indian numbers (+91 or no prefix), enforce 10 digits starting with 6/7/8/9.
+    """
+    phone = re.sub(r"[\s\-]", "", raw_phone)
+    if has_non_indian_code:
+        # Non-Indian: accept as-is if 7+ digits
+        digits = re.sub(r"[^\d]", "", phone)
+        return digits if len(digits) >= 7 else ""
+    # Indian: must be 10 digits starting with 6/7/8/9
+    if len(phone) > 10:
+        phone = phone[-10:]
+    return phone if is_valid_indian_phone(phone) else ""
+
+
 def extract_phone(body: str) -> str:
-    """Extract Indian phone number from email body or HTML."""
+    """Extract phone number from email body or HTML.
+    Supports Indian (+91) and international numbers.
+    """
+    # First: try international numbers with non-Indian country codes
+    intl_match = re.search(r'\+((?!91\b)\d{1,3})[\s\-]?(\d[\d\s\-]{6,14})', body)
+    if intl_match:
+        code = intl_match.group(1)
+        number = re.sub(r'[\s\-]', '', intl_match.group(2))
+        if len(number) >= 7:
+            return f"+{code}{number}"
+
+    # Then: Indian phone patterns
     patterns = [
-        r"(?:phone|mobile|contact|cell|tel|mob)\s*[:\-–]\s*\+?(\d[\d\s\-]{8,14})",
+        r"(?:phone|mobile|contact|cell|tel|mob)\s*[:\-\u2013]\s*\+?91[\s\-]?(\d{10})",
+        r"(?:phone|mobile|contact|cell|tel|mob)\s*[:\-\u2013]\s*\+?(\d[\d\s\-]{8,14})",
         r"wa\.me/(\d{10,13})",
         r"api\.whatsapp\.com/send\?phone=(\d{10,13})",
-        r"tel:\+?(\d{10,13})",
+        r'tel:\+?91[\s\-]?(\d{10})',
         r"\+91[\s\-]?(\d{10})",
         r"(?<!\d)(\d{10})(?!\d)",
         r"(?<!\d)(\d{5}[\s\-]\d{5})(?!\d)",
     ]
     for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
-        if match:
+        for match in re.finditer(pattern, body, re.IGNORECASE):
             phone = re.sub(r"[\s\-]", "", match.group(1))
             if len(phone) >= 10:
-                return phone[-10:]  # last 10 digits
+                phone = phone[-10:]
+                if is_valid_indian_phone(phone):
+                    return phone
     return ""
 
 
@@ -447,11 +613,6 @@ def extract_property_type(body: str, subject: str) -> str:
     """Extract property type from email content."""
     combined = f"{subject} {body}".lower()
 
-    # Check for BHK first
-    bhk = re.search(r"(\d)\s*bhk", combined)
-    if bhk:
-        return f"{bhk.group(1)}BHK apartment"
-
     types = {
         "apartment": ["apartment", "flat", "multistorey"],
         "villa": ["villa", "bungalow", "independent house", "duplex", "row house"],
@@ -469,7 +630,7 @@ def extract_property_type(body: str, subject: str) -> str:
 def fetch_gmail_leads(
     gmail_user: str,
     gmail_app_password: str,
-    max_emails: int = 20,
+    max_emails: Optional[int] = None,
     folder: str = "INBOX",
 ) -> list:
     """
@@ -478,59 +639,79 @@ def fetch_gmail_leads(
     Searches for UNSEEN emails from real estate portals.
     Returns both plain text and HTML bodies for full extraction.
     """
-    leads = []
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(gmail_user, gmail_app_password)
         mail.select(folder)
 
-        # Search for UNSEEN emails from real estate portals
+        # Only fetch actual LEAD emails (not promotional/listing emails)
+        # Each query targets emails with real contact data (name, phone)
         search_queries = [
-            '(UNSEEN FROM "housing.com")',
-            '(UNSEEN FROM "99acres.com")',
-            '(UNSEEN FROM "magicbricks.com")',
+            # Housing.com: "Lead - XYZ would like to talk to you"
+            '(SINCE "03-May-2026" FROM "housing.com" SUBJECT "Lead")',
+            # MagicBricks: "Buyer has contacted you on Magicbricks"
+            '(SINCE "03-May-2026" FROM "magicbricks.com" SUBJECT "contacted")',
+            # 99acres: "Advertisement Response" or "Property Advertisement Query"
+            '(SINCE "03-May-2026" FROM "99acres.com" SUBJECT "Response")',
+            '(SINCE "03-May-2026" FROM "99acres.com" SUBJECT "Query")',
         ]
 
-        seen_ids = set()
+        all_email_ids = set()
         for query in search_queries:
             status, data = mail.search(None, query)
             if status != "OK":
                 continue
+            for eid in data[0].split():
+                all_email_ids.add(int(eid))
+        
+        # Sort chronologically (oldest to newest), then reverse for newest-first
+        sorted_ids = sorted(list(all_email_ids), reverse=True)
+        print(f"Total lead IDs found: {len(sorted_ids)}")
+        
+        if max_emails is not None:
+            sorted_ids = sorted_ids[:max_emails]
+            print(f"Limiting to latest {max_emails} emails")
 
-            email_ids = data[0].split()
-            # Take latest N
-            for eid in email_ids[-max_emails:]:
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
+        for eid_int in sorted_ids:
+            print(f"Processing email ID: {eid_int}")
+            eid = str(eid_int).encode()
+            status, msg_data = mail.fetch(eid, "(RFC822)")
+            if status != "OK":
+                continue
 
-                status, msg_data = mail.fetch(eid, "(RFC822)")
-                if status != "OK":
-                    continue
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
 
-                raw = msg_data[0][1]
-                msg = email.message_from_bytes(raw)
+            subject = ""
+            raw_subject = msg.get("Subject", "")
+            decoded = decode_header(raw_subject)
+            for part, enc in decoded:
+                if isinstance(part, bytes):
+                    subject += part.decode(enc or "utf-8", errors="replace")
+                else:
+                    subject += part
 
-                subject = ""
-                raw_subject = msg.get("Subject", "")
-                decoded = decode_header(raw_subject)
-                for part, enc in decoded:
-                    if isinstance(part, bytes):
-                        subject += part.decode(enc or "utf-8", errors="replace")
-                    else:
-                        subject += part
+            sender = msg.get("From", "")
 
-                sender = msg.get("From", "")
-                body, html_body = _get_email_bodies(msg)
-                lead = parse_lead_from_email(subject, body, sender, html_body)
-                lead["raw_subject"] = subject
-                leads.append(lead)
+            # Extract email date (when email was received)
+            email_date = msg.get("Date", "")
+            received_at = None
+            if email_date:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    received_at = parsedate_to_datetime(email_date)
+                except Exception:
+                    pass
+
+            body, html_body = _get_email_bodies(msg)
+            lead = parse_lead_from_email(subject, body, sender, html_body)
+            lead["raw_subject"] = subject
+            lead["received_at"] = received_at  # actual email timestamp
+            yield lead
 
         mail.logout()
     except Exception as e:
         print(f"Gmail fetch error: {e}")
-
-    return leads
 
 
 def _get_email_bodies(msg) -> tuple:

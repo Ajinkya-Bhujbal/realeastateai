@@ -50,6 +50,8 @@ class LeadCreate(BaseModel):
     budget_max: Optional[float] = None
     preferred_location: Optional[str] = None
     property_type: Optional[str] = None
+    configuration: Optional[str] = None
+    price: Optional[str] = None
     notes: Optional[str] = None
 
 class LeadUpdate(BaseModel):
@@ -61,6 +63,9 @@ class LeadUpdate(BaseModel):
     budget_max: Optional[float] = None
     preferred_location: Optional[str] = None
     property_type: Optional[str] = None
+    configuration: Optional[str] = None
+    price: Optional[str] = None
+    tag: Optional[str] = None
     notes: Optional[str] = None
 
 class EmailParseRequest(BaseModel):
@@ -229,6 +234,9 @@ def list_leads(
                 "budget_max": l.budget_max,
                 "preferred_location": l.preferred_location,
                 "property_type": l.property_type,
+                "configuration": l.configuration,
+                "price": l.price,
+                "tag": l.tag,
                 "notes": l.notes,
                 "created_at": l.created_at.isoformat() if l.created_at else None,
                 "updated_at": l.updated_at.isoformat() if l.updated_at else None,
@@ -270,6 +278,9 @@ def get_lead(lead_id: int, db: Session = Depends(get_db)):
         "budget_max": lead.budget_max,
         "preferred_location": lead.preferred_location,
         "property_type": lead.property_type,
+        "configuration": lead.configuration,
+        "price": lead.price,
+        "tag": lead.tag,
         "notes": lead.notes,
         "created_at": lead.created_at.isoformat() if lead.created_at else None,
         "updated_at": lead.updated_at.isoformat() if lead.updated_at else None,
@@ -376,6 +387,11 @@ def fetch_from_gmail(req: GmailFetchRequest, db: Session = Depends(get_db)):
     created = 0
     skipped = 0
     for parsed in leads:
+        # Skip junk
+        if not parsed.get("phone") and not parsed.get("email"):
+            skipped += 1
+            continue
+
         # Check duplicate
         if parsed.get("phone"):
             existing = db.query(Lead).filter(Lead.phone == parsed["phone"]).first()
@@ -397,13 +413,15 @@ def fetch_from_gmail(req: GmailFetchRequest, db: Session = Depends(get_db)):
             budget_max=parsed.get("budget_max"),
             preferred_location=parsed.get("preferred_location", ""),
             property_type=parsed.get("property_type", ""),
+            configuration=parsed.get("configuration", ""),
+            price=parsed.get("price", ""),
             notes=parsed.get("notes", ""),
         )
         db.add(lead)
         created += 1
 
     db.commit()
-    return {"created": created, "skipped": skipped, "total_found": len(leads)}
+    return {"created": created, "skipped": skipped, "total_found": created + skipped}
 
 
 # ─── Messaging ────────────────────────────────────────────────────────
