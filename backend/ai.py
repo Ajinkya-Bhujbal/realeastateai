@@ -132,26 +132,34 @@ def generate_rag_reply(
     if kb_results:
         kb_snippets = []
         for r in kb_results[:3]:
-            kb_snippets.append(r.get("text", "")[:200])
+            kb_snippets.append(r.get("text", "")[:400])
         kb_context = "\n".join(kb_snippets)
 
     # Build property context
     prop_context = ""
     if property_results:
-        for p in property_results[:2]:
-            prop_context += f"- {p.get('title', '')} in {p.get('location', '')}, Rs {p.get('price', '')}L\n"
+        for p in property_results[:3]:
+            prop_context += f"- {p.get('title', '')} in {p.get('location', '')}, Rs {p.get('price', '')}L, {p.get('bedrooms', '')}BHK\n"
 
-    prompt = f"""You are a helpful real estate agent assistant. Reply to this WhatsApp message in 2-4 lines.
-Use the knowledge base and property info below if relevant. Be natural and conversational.
+    prompt = f"""You are an AI assistant for a real estate company. Reply to this WhatsApp message in 2-4 lines.
+IMPORTANT RULES:
+- ONLY use facts from the Company Info and Property Data sections below. Do NOT invent company names, prices, or locations.
+- If the info is not available below, say you will check and get back to them.
+- Be warm, professional, and brief (WhatsApp style).
+- Use Indian Rupees (Lakhs/Crores) for pricing.
 
 From: {lead_name}
-Message: {incoming_message[:200]}
-{f'Lead info: {lead_context[:150]}' if lead_context else ''}
-{f'Knowledge base:{chr(10)}{kb_context[:400]}' if kb_context else ''}
-{f'Available properties:{chr(10)}{prop_context[:300]}' if prop_context else ''}
+Message: {incoming_message[:300]}
+{f'Lead info: {lead_context[:200]}' if lead_context else ''}
 
-Reply (helpful, warm, brief WhatsApp style):"""
-    return generate(prompt, max_tokens=200)
+--- Company Info ---
+{kb_context[:800] if kb_context else 'No company info available.'}
+
+--- Property Data ---
+{prop_context[:500] if prop_context else 'No matching properties found.'}
+
+Reply:"""
+    return generate(prompt, max_tokens=250)
 
 
 def summarize_lead(lead_data: dict) -> str:

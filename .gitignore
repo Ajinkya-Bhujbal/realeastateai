@@ -20,8 +20,11 @@ coverage.xml
 
 # Data and Databases
 data/leads.db
+backend/leads.db
+backend/local_crm.db
 data/chroma_db/
 *.sqlite3
+*.db
 
 # Secrets
 .env

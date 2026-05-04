@@ -49,7 +49,7 @@ def start_scheduler():
                 replace_existing=True,
                 next_run_time=datetime.datetime.now(),  # Run immediately on startup
             )
-            print("Email poller started (1 min) - checking Gmail for new leads")
+            print("Email poller started (30 sec) - checking Gmail for new leads")
         else:
             print("Email poller skipped - GMAIL_USER/GMAIL_APP_PASSWORD not set in .env")
         scheduler.start()
@@ -289,23 +289,6 @@ def process_email_leads():
                 skipped += 1
                 continue
 
-            # Dedup: check if lead with same phone or email already exists
-            existing = None
-            if phone:
-                existing = db.query(Lead).filter(Lead.phone == phone).first()
-            if not existing and lead_email:
-                existing = db.query(Lead).filter(Lead.email == lead_email).first()
-
-            if existing:
-                skipped += 1
-                consecutive_duplicates += 1
-                # If we hit 20 consecutive duplicates, assume we've reached already-parsed history
-                if consecutive_duplicates >= 20:
-                    print(f"Email poller: Reached known history. Stopping early after {created} created, {skipped} skipped.")
-                    break
-                continue
-            
-            consecutive_duplicates = 0
 
             lead = Lead(
                 name=name,

@@ -81,7 +81,7 @@ Ollama runs AI models locally on your machine. No cloud, no API keys, completely
    ```
 4. Pull the AI model we use (Phi-3 Mini, ~2.3 GB download):
    ```
-   ollama pull phi3:mini
+   ollama pull phi3:minista
    ```
    Wait for the download to complete. This only happens once.
 

@@ -120,8 +120,11 @@
                             </div>
                         </div>
                         <div class="wa-input-bar" id="wa-input-bar" style="display:none">
+                            <button class="btn-icon wa-attach-btn" id="btn-wa-attach" title="Attach Media">📎</button>
+                            <input type="file" id="wa-file-input" style="display:none" accept="image/*,video/*,application/pdf">
+                            <div id="wa-file-preview" style="display:none; font-size:12px; margin-right:8px; color:var(--text-secondary); max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
                             <input type="text" id="wa-msg-input" placeholder="Type a message..." class="wa-msg-field">
-                            <button class="btn-icon wa-ai-btn" id="btn-wa-ai" title="Generate AI reply">🤖</button>
+                            <button class="btn-icon wa-ai-btn" id="btn-wa-ai" title="Generate AI reply">✨</button>
                             <button class="btn wa-send-btn" id="btn-wa-send">Send</button>
                         </div>
                     </div>

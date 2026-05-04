@@ -13,7 +13,7 @@ import datetime
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import get_db, init_db
 from models import Lead, Message, Property, FollowUpSchedule
 from parser import parse_lead_from_email, fetch_gmail_leads
-from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_message
+from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_message, upload_whatsapp_media
 from ai import (
     check_ollama, list_models, generate_lead_reply,
     generate_followup_message, generate_property_recommendation,
@@ -136,6 +136,17 @@ async def lifespan(app: FastAPI):
         print(f"[OK] Ollama connected. Models: {', '.join(models) if models else 'none loaded'}")
     else:
         print("[WARN] Ollama not running. AI features will be limited.")
+
+    # Auto-index knowledge base on startup
+    try:
+        kb_status = get_kb_status()
+        if kb_status["files"] > 0:
+            result = index_kb_folder()
+            print(f"[OK] Knowledge base indexed: {result['total_chunks']} chunks from {result['files']} files")
+        else:
+            print("[WARN] No knowledge base files found in data/knowledge_base/")
+    except Exception as e:
+        print(f"[WARN] KB indexing failed: {e}")
 
     print(f"[OK] Server ready at http://localhost:8000")
     print("="*50)
@@ -389,20 +400,9 @@ def fetch_from_gmail(req: GmailFetchRequest, db: Session = Depends(get_db)):
     for parsed in leads:
         # Skip junk
         if not parsed.get("phone") and not parsed.get("email"):
+            print("Skipping as junk because no phone/email")
             skipped += 1
             continue
-
-        # Check duplicate
-        if parsed.get("phone"):
-            existing = db.query(Lead).filter(Lead.phone == parsed["phone"]).first()
-            if existing:
-                skipped += 1
-                continue
-        if parsed.get("email"):
-            existing = db.query(Lead).filter(Lead.email == parsed["email"]).first()
-            if existing:
-                skipped += 1
-                continue
 
         lead = Lead(
             name=parsed.get("name", "Unknown"),
@@ -795,7 +795,7 @@ def dashboard_stats(db: Session = Depends(get_db)):
         "total_properties": total_properties,
         "leads_by_source": source_counts,
         "recent_leads": [
-            {"id": l.id, "name": l.name, "source": l.source, "status": l.status, "created_at": l.created_at.isoformat() if l.created_at else None}
+            {"id": l.id, "name": l.name, "source": l.source, "status": l.status, "price": l.price, "preferred_location": l.preferred_location, "property_type": l.property_type, "created_at": l.created_at.isoformat() if l.created_at else None}
             for l in recent
         ],
     }
@@ -906,6 +906,58 @@ def send_chat_message(lead_id: int, req: SendMessageRequest, db: Session = Depen
         direction="out",
         channel="whatsapp",
         content=req.message,
+        status="sent" if result.get("success") or result.get("mock") else "failed",
+        wa_message_id=result.get("message_id", ""),
+        is_read=True,
+    )
+    db.add(msg)
+    lead.last_message_at = datetime.datetime.utcnow()
+    if lead.status == "new":
+        lead.status = "contacted"
+    db.commit()
+    return {"message_id": msg.id, "wa_result": result}
+
+
+
+
+@app.post("/api/chats/{lead_id}/send-media")
+async def send_chat_media(
+    lead_id: int, 
+    file: UploadFile = File(...), 
+    message: str = Form(""), 
+    db: Session = Depends(get_db)
+):
+    """Send a media message from the chat UI."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if not lead.phone:
+        raise HTTPException(status_code=400, detail="Lead has no phone number")
+
+    content_type = file.content_type
+    if "image" in content_type:
+        media_type = "image"
+    elif "video" in content_type:
+        media_type = "video"
+    elif "audio" in content_type:
+        media_type = "audio"
+    else:
+        media_type = "document"
+
+    file_bytes = await file.read()
+    media_id = upload_whatsapp_media(file_bytes, content_type, file.filename)
+    
+    if not media_id:
+        raise HTTPException(status_code=500, detail="Failed to upload media to WhatsApp API")
+
+    result = send_whatsapp_message(lead.phone, message, media_id=media_id, media_type=media_type)
+
+    msg_content = f"[{media_type.upper()}] {message}".strip()
+    msg = Message(
+        lead_id=lead.id,
+        direction="out",
+        channel="whatsapp",
+        content=msg_content,
         status="sent" if result.get("success") or result.get("mock") else "failed",
         wa_message_id=result.get("message_id", ""),
         is_read=True,

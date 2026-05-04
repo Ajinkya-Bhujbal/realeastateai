@@ -72,6 +72,8 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
             if price_match2:
                 result["price"] = price_match2.group(1).strip()
 
+    with open("parser_debug.log", "a", encoding="utf-8") as f:
+        f.write(f"Source: {source}\nResult: {result}\n---\n")
     return result
 
 
@@ -644,16 +646,11 @@ def fetch_gmail_leads(
         mail.login(gmail_user, gmail_app_password)
         mail.select(folder)
 
-        # Only fetch actual LEAD emails (not promotional/listing emails)
-        # Each query targets emails with real contact data (name, phone)
         search_queries = [
-            # Housing.com: "Lead - XYZ would like to talk to you"
-            '(SINCE "03-May-2026" FROM "housing.com" SUBJECT "Lead")',
-            # MagicBricks: "Buyer has contacted you on Magicbricks"
-            '(SINCE "03-May-2026" FROM "magicbricks.com" SUBJECT "contacted")',
-            # 99acres: "Advertisement Response" or "Property Advertisement Query"
-            '(SINCE "03-May-2026" FROM "99acres.com" SUBJECT "Response")',
-            '(SINCE "03-May-2026" FROM "99acres.com" SUBJECT "Query")',
+            '(UNSEEN SINCE "03-May-2026" FROM "housing-mailer.com")',
+            '(UNSEEN SINCE "03-May-2026" FROM "housing.com")',
+            '(UNSEEN SINCE "03-May-2026" FROM "magicbricks.com")',
+            '(UNSEEN SINCE "03-May-2026" FROM "99acres.com")',
         ]
 
         all_email_ids = set()

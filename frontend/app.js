@@ -97,7 +97,13 @@ async function loadDashboard() {
     if (d.recent_leads && d.recent_leads.length > 0) {
         rl.innerHTML = d.recent_leads.map(l => `
             <div class="recent-lead-item">
-                <div><div class="recent-lead-name">${esc(l.name)}</div><div class="recent-lead-meta">${l.source} &middot; ${timeAgo(l.created_at)}</div></div>
+                <div>
+                    <div class="recent-lead-name">${esc(l.name)}</div>
+                    <div class="recent-lead-meta">${l.source} &middot; ${timeAgo(l.created_at)}</div>
+                    <div class="recent-lead-meta" style="color:var(--text-primary); margin-top:4px;">
+                        ${l.price ? `<strong>${esc(l.price)}</strong> &middot; ` : ''}${esc(l.preferred_location || l.property_type || '')}
+                    </div>
+                </div>
                 <span class="badge badge-${l.status}">${l.status}</span>
             </div>`).join('');
     } else { rl.innerHTML = '<div class="empty-state">No leads yet</div>'; }
@@ -360,10 +366,25 @@ window.selectChat = async function (leadId) {
 $('btn-wa-send').addEventListener('click', sendChatMessage);
 $('wa-msg-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChatMessage(); });
 
+let currentFile = null;
+if ($('btn-wa-attach')) {
+    $('btn-wa-attach').addEventListener('click', () => $('wa-file-input').click());
+    $('wa-file-input').addEventListener('change', (e) => {
+        if (e.target.files.length > 0) {
+            currentFile = e.target.files[0];
+            $('wa-file-preview').textContent = currentFile.name;
+            $('wa-file-preview').style.display = 'block';
+        } else {
+            currentFile = null;
+            $('wa-file-preview').style.display = 'none';
+        }
+    });
+}
+
 async function sendChatMessage() {
     if (!currentLeadId) return;
     const msg = $('wa-msg-input').value.trim();
-    if (!msg) return;
+    if (!msg && !currentFile) return;
     $('wa-msg-input').value = '';
 
     // Optimistic UI: append bubble immediately
@@ -373,12 +394,36 @@ async function sendChatMessage() {
 
     const bubble = document.createElement('div');
     bubble.className = 'wa-msg-bubble out';
-    bubble.innerHTML = `${esc(msg)}<div class="wa-msg-time">just now</div>`;
+    let displayMsg = msg;
+    if (currentFile) displayMsg = `📎 ${currentFile.name}<br>` + msg;
+    bubble.innerHTML = `${esc(displayMsg)}<div class="wa-msg-time">just now</div>`;
     box.appendChild(bubble);
     box.scrollTop = box.scrollHeight;
 
-    const r = await api(`/api/chats/${currentLeadId}/send`, { method: 'POST', body: { lead_id: currentLeadId, message: msg } });
-    if (r) toast('Sent');
+    if (currentFile) {
+        const formData = new FormData();
+        formData.append('file', currentFile);
+        formData.append('message', msg);
+        
+        try {
+            const res = await fetch(`/api/chats/${currentLeadId}/send-media`, {
+                method: 'POST',
+                body: formData
+            });
+            if (res.ok) toast('Media sent');
+            else toast('Failed to send media', 'error');
+        } catch (e) {
+            toast('Failed to send media', 'error');
+        }
+        
+        currentFile = null;
+        $('wa-file-input').value = '';
+        $('wa-file-preview').style.display = 'none';
+    } else {
+        const r = await api(`/api/chats/${currentLeadId}/send`, { method: 'POST', body: { lead_id: currentLeadId, message: msg } });
+        if (r) toast('Sent');
+    }
+    
     loadChats();
 }
 
