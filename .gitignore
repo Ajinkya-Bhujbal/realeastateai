@@ -38,3 +38,5 @@ data/chroma_db/
 ehthumbs.db
 Thumbs.db
 pass
+# Media files
+data/media/
