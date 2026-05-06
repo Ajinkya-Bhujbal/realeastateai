@@ -1,0 +1,40 @@
+{
+    "files.exclude": {
+        "**/chroma_db": true,
+        "**/media": true,
+        "**/__pycache__": true,
+        "**/.venv": true,
+        "**/venv": true,
+        "**/node_modules": true,
+        "**/ngrok-v3-stable-windows-amd64*": true,
+        "**/*.log": true,
+        "**/leads.db": true,
+        "**/*.sqlite3": true
+    },
+    "files.watcherExclude": {
+        "**/chroma_db/**": true,
+        "**/media/**": true,
+        "**/.venv/**": true,
+        "**/venv/**": true,
+        "**/node_modules/**": true,
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/ngrok-v3-stable-windows-amd64*/**": true,
+        "**/data/**/*.db": true,
+        "**/data/**/*.sqlite3": true,
+        "**/__pycache__/**": true
+    },
+    "search.exclude": {
+        "**/chroma_db": true,
+        "**/media": true,
+        "**/.venv": true,
+        "**/venv": true,
+        "**/node_modules": true,
+        "**/ngrok-v3-stable-windows-amd64*": true,
+        "**/*.log": true,
+        "**/*.db": true,
+        "**/*.sqlite3": true
+    },
+    "files.watcherMaxSize": 256,
+    "editor.largeFileOptimizations": true
+}

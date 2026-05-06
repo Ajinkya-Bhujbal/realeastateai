@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LeadPilot - AI Real Estate Lead Manager</title>
+    <meta name="description" content="AI-powered real estate lead management with WhatsApp integration">
+    <link rel="stylesheet" href="/static/style.css?v=20260506">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Toast container -->
+    <div id="toast-container"></div>
+
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <span class="logo-icon">🏠</span>
+                <span class="logo-text">LeadPilot</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-view="dashboard" id="nav-dashboard">
+                    <span class="nav-icon">📊</span> Dashboard
+                </a>
+                <a href="#" class="nav-item" data-view="leads" id="nav-leads">
+                    <span class="nav-icon">👥</span> Leads
+                </a>
+                <a href="#" class="nav-item" data-view="messages" id="nav-messages">
+                    <span class="nav-icon">💬</span> Messages
+                    <span class="nav-badge" id="nav-unread-badge" style="display:none">0</span>
+                </a>
+                <a href="#" class="nav-item" data-view="properties" id="nav-properties">
+                    <span class="nav-icon">🏘️</span> Properties
+                </a>
+                <a href="#" class="nav-item" data-view="ai" id="nav-ai">
+                    <span class="nav-icon">🤖</span> AI Tools
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <span class="status-dot offline" id="ai-dot"></span>
+                <span class="status-text" id="ai-status-text">AI Offline</span>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="main-content">
+            <!-- Top bar -->
+            <header class="top-bar">
+                <button class="menu-toggle" id="menu-toggle">☰</button>
+                <h1 class="page-title" id="page-title">Dashboard</h1>
+                <div class="top-actions">
+                    <button class="btn btn-primary" id="btn-add-lead">+ Add Lead</button>
+                    <button class="btn btn-outline" id="btn-parse-email">✉ Parse Email</button>
+                </div>
+            </header>
+
+            <!-- ═══ Dashboard View ═══ -->
+            <section class="view active" id="view-dashboard">
+                <div class="stats-grid">
+                    <div class="stat-card"><div class="stat-value" id="stat-total">0</div><div class="stat-label">TOTAL LEADS</div><div class="stat-accent accent-blue"></div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-new">0</div><div class="stat-label">NEW</div><div class="stat-accent accent-orange"></div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-contacted">0</div><div class="stat-label">CONTACTED</div><div class="stat-accent accent-cyan"></div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-converted">0</div><div class="stat-label">CONVERTED</div><div class="stat-accent accent-green"></div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-messages">0</div><div class="stat-label">MESSAGES</div><div class="stat-accent accent-orange"></div></div>
+                    <div class="stat-card"><div class="stat-value" id="stat-followups">0</div><div class="stat-label">FOLLOW-UPS</div><div class="stat-accent accent-cyan"></div></div>
+                </div>
+                <div class="dashboard-grid">
+                    <div class="card"><h3>Recent Leads</h3><div id="recent-leads-list" class="recent-leads"></div></div>
+                    <div class="card"><h3>Leads by Source</h3><div id="source-chart"></div></div>
+                </div>
+            </section>
+
+            <!-- ═══ Leads View ═══ -->
+            <section class="view" id="view-leads">
+                <div class="filter-bar">
+                    <input type="text" id="lead-search" placeholder="Search leads..." class="input">
+                    <select id="filter-status" class="input"><option value="">All Status</option><option value="new">New</option><option value="contacted">Contacted</option><option value="interested">Interested</option><option value="converted">Converted</option><option value="lost">Lost</option></select>
+                    <select id="filter-source" class="input"><option value="">All Sources</option><option value="housing">Housing.com</option><option value="99acres">99acres</option><option value="magicbricks">MagicBricks</option><option value="manual">Manual</option><option value="whatsapp">WhatsApp</option></select>
+                </div>
+                <div class="table-wrap"><table class="data-table"><thead><tr><th>Name</th><th>Phone</th><th>Source</th><th>Config</th><th>Price/Budget</th><th>Location</th><th>Created</th><th>Welcome</th><th>Tag</th><th>Actions</th></tr></thead><tbody id="leads-tbody"></tbody></table></div>
+            </section>
+
+            <!-- ═══ Messages View (WhatsApp Web) ═══ -->
+            <section class="view" id="view-messages">
+                <div class="wa-container">
+                    <!-- Left: Contact list -->
+                    <div class="wa-sidebar">
+                        <div class="wa-sidebar-header">
+                            <h3>Chats</h3>
+                            <button class="btn-icon" id="btn-simulate" title="Simulate incoming message">📩</button>
+                        </div>
+                        <div class="wa-search-bar">
+                            <input type="text" id="chat-search" placeholder="Search contacts..." class="wa-search-input">
+                        </div>
+                        <div class="wa-contact-list" id="wa-contact-list">
+                            <div class="empty-state small">No conversations yet</div>
+                        </div>
+                    </div>
+                    <!-- Right: Chat area -->
+                    <div class="wa-chat-area">
+                        <div class="wa-chat-header" id="wa-chat-header">
+                            <div class="wa-chat-header-info">
+                                <div class="wa-avatar" id="wa-chat-avatar">?</div>
+                                <div>
+                                    <div class="wa-chat-name" id="wa-chat-name">Select a conversation</div>
+                                    <div class="wa-chat-phone" id="wa-chat-phone"></div>
+                                </div>
+                            </div>
+                            <div class="wa-chat-header-actions" id="wa-chat-actions" style="display:none">
+                                <button class="btn-icon wa-auto-reply-btn" id="btn-toggle-auto" title="Toggle auto-reply">🤖</button>
+                                <span class="wa-auto-label" id="wa-auto-label">Auto: ON</span>
+                            </div>
+                        </div>
+                        <div class="wa-messages" id="wa-messages">
+                            <div class="wa-empty-chat">
+                                <div class="wa-empty-icon">💬</div>
+                                <h3>LeadPilot Chat</h3>
+                                <p>Select a contact to view messages</p>
+                            </div>
+                        </div>
+                        <div class="wa-input-bar" id="wa-input-bar" style="display:none">
+                            <button class="btn-icon wa-attach-btn" id="btn-wa-attach" title="Attach Media">📎</button>
+                            <input type="file" id="wa-file-input" style="display:none" accept="image/*,video/*,application/pdf">
+                            <div id="wa-file-preview" style="display:none; font-size:12px; margin-right:8px; color:var(--text-secondary); max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+                            <input type="text" id="wa-msg-input" placeholder="Type a message..." class="wa-msg-field">
+                            <button class="btn-icon wa-ai-btn" id="btn-wa-ai" title="Generate AI reply">✨</button>
+                            <button class="btn wa-send-btn" id="btn-wa-send">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ═══ Properties View ═══ -->
+            <section class="view" id="view-properties">
+                <div class="filter-bar">
+                    <input type="text" id="property-search" placeholder="Search: 3BHK apartment Whitefield..." class="input" style="flex:1">
+                    <button class="btn btn-primary" id="btn-search-properties">Search</button>
+                    <button class="btn btn-outline" id="btn-index-samples">Index Samples</button>
+                </div>
+                <div class="properties-grid" id="properties-grid"><div class="empty-state">No properties found. Try indexing samples first.</div></div>
+            </section>
+
+            <!-- ═══ AI Tools View ═══ -->
+            <section class="view" id="view-ai">
+                <div class="ai-grid">
+                    <div class="card">
+                        <h3>AI Status</h3>
+                        <div id="ai-status-detail"></div>
+                    </div>
+                    <div class="card">
+                        <h3>Knowledge Base</h3>
+                        <div id="kb-status"></div>
+                        <button class="btn btn-primary" id="btn-index-kb" style="margin-top:12px">Index Knowledge Base</button>
+                    </div>
+                    <div class="card">
+                        <h3>Parse Email</h3>
+                        <input type="text" id="parse-sender" placeholder="Sender email" class="input">
+                        <input type="text" id="parse-subject" placeholder="Subject" class="input">
+                        <textarea id="parse-body" placeholder="Email body..." class="input" rows="4"></textarea>
+                        <button class="btn btn-primary" id="btn-do-parse">Parse & Save</button>
+                        <pre id="parse-result" class="result-box" style="display:none"></pre>
+                    </div>
+                    <div class="card">
+                        <h3>RAG Search</h3>
+                        <input type="text" id="rag-query" placeholder="Search query..." class="input">
+                        <button class="btn btn-primary" id="btn-rag-search">Search KB</button>
+                        <pre id="rag-result" class="result-box" style="display:none"></pre>
+                    </div>
+                    <div class="card">
+                        <h3>Follow-up Scheduler</h3>
+                        <input type="number" id="fu-lead-id" placeholder="Lead ID" class="input">
+                        <input type="number" id="fu-frequency" placeholder="Every N hours" value="24" class="input">
+                        <input type="number" id="fu-max" placeholder="Max follow-ups" value="5" class="input">
+                        <button class="btn btn-primary" id="btn-create-followup">Schedule</button>
+                        <pre id="followup-result" class="result-box" style="display:none"></pre>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Add Lead Modal -->
+    <div class="modal-overlay" id="modal-overlay">
+        <div class="modal">
+            <div class="modal-header"><h3>Add New Lead</h3><button class="modal-close" id="modal-close">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group"><label>Name *</label><input type="text" id="new-lead-name" class="input"></div>
+                    <div class="form-group"><label>Phone</label><input type="text" id="new-lead-phone" class="input"></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Email</label><input type="email" id="new-lead-email" class="input"></div>
+                    <div class="form-group"><label>Source</label><select id="new-lead-source" class="input"><option value="manual">Manual</option><option value="housing">Housing.com</option><option value="99acres">99acres</option><option value="magicbricks">MagicBricks</option></select></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Budget Min (L)</label><input type="number" id="new-lead-budget-min" class="input"></div>
+                    <div class="form-group"><label>Budget Max (L)</label><input type="number" id="new-lead-budget-max" class="input"></div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group"><label>Location</label><input type="text" id="new-lead-location" class="input"></div>
+                    <div class="form-group"><label>Type</label><select id="new-lead-type" class="input"><option value="apartment">Apartment</option><option value="villa">Villa</option><option value="plot">Plot</option><option value="office">Office</option></select></div>
+                </div>
+                <div class="form-group"><label>Notes</label><textarea id="new-lead-notes" class="input" rows="2"></textarea></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" id="btn-cancel-lead">Cancel</button>
+                <button class="btn btn-primary" id="btn-save-lead">Save Lead</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Simulate Message Modal -->
+    <div class="modal-overlay" id="simulate-modal">
+        <div class="modal" style="max-width:400px">
+            <div class="modal-header"><h3>Simulate Incoming Message</h3><button class="modal-close" id="sim-modal-close">&times;</button></div>
+            <div class="modal-body">
+                <div class="form-group"><label>Phone</label><input type="text" id="sim-phone" class="input" placeholder="9876543210"></div>
+                <div class="form-group"><label>Sender Name</label><input type="text" id="sim-name" class="input" placeholder="Test User"></div>
+                <div class="form-group"><label>Message</label><textarea id="sim-message" class="input" rows="3" placeholder="Hello, I'm interested in 3BHK..."></textarea></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" id="sim-cancel">Cancel</button>
+                <button class="btn btn-primary" id="sim-send">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=20260506"></script>
+</body>
+</html>
