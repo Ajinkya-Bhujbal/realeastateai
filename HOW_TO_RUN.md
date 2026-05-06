@@ -30,9 +30,25 @@ If you prefer to run the components manually:
 python backend/main.py
 ```
 
-### 4. Troubleshooting
-- **Port 8000 is occupied**: If you see an error saying "Only one usage of each socket address is permitted", it means the server is already running. You can stop it by pressing `Ctrl+C` in the terminal where it's running, or by closing that terminal.
-- **AI not replying**: Ensure Ollama is running and you have internet access for the first-time setup (the system needs to download a small embedding model (~100MB) for the knowledge base).
+### 4. Troubleshooting & Managing Processes
+- **Port 8000 is occupied**: If you see an error saying the port is in use, it means a background process is still running.
+  
+  **To find and stop the process manually:**
+  1. Find the Process ID (PID):
+     ```powershell
+     netstat -ano | findstr :8000
+     ```
+  2. Kill the process (replace `<PID>` with the number from the last column):
+     ```powershell
+     taskkill /F /PID <PID>
+     ```
+
+- **Viewing logs**: If you use `start.bat`, logs appear in that terminal window. If you want to run it manually to debug:
+  ```powershell
+  .\venv\Scripts\activate
+  cd backend
+  python main.py
+  ```
 
 ### 5. Updating Knowledge Base
 If you add new `.txt` files to `data/knowledge_base/`, simply restart the server. It will automatically re-index the files on startup.

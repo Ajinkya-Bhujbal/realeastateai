@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 # Add backend dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db import get_db, init_db, SessionLocal
+from db import get_db, init_db, SessionLocal, engine
 from models import Lead, Message, Property, FollowUpSchedule
 from parser import parse_lead_from_email, fetch_gmail_leads
 from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_message, upload_whatsapp_media
@@ -124,6 +124,18 @@ async def lifespan(app: FastAPI):
     print("  Real Estate Lead Management System")
     print("="*50)
     init_db()
+    # Auto-migrate: add processing_lock_at column if missing (for existing DBs)
+    try:
+        from sqlalchemy import text, inspect
+        with engine.connect() as conn:
+            inspector = inspect(engine)
+            columns = [c["name"] for c in inspector.get_columns("messages")]
+            if "processing_lock_at" not in columns:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN processing_lock_at DATETIME"))
+                conn.commit()
+                print("[OK] Database migrated: added processing_lock_at column")
+    except Exception as e:
+        print(f"[WARN] Migration check: {e}")
     print("[OK] Database initialized")
 
     # Start follow-up scheduler
@@ -212,7 +224,7 @@ def health_check():
         "status": "ok",
         "ollama": ollama_ok,
         "models": list_models() if ollama_ok else [],
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
 
@@ -352,7 +364,7 @@ def update_lead(lead_id: int, update: LeadUpdate, db: Session = Depends(get_db))
     update_data = update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(lead, key, value)
-    lead.updated_at = datetime.datetime.utcnow()
+    lead.updated_at = datetime.datetime.now(datetime.timezone.utc)
     db.commit()
     return {"id": lead.id, "status": "updated"}
 
@@ -472,7 +484,7 @@ def send_message(req: SendMessageRequest, db: Session = Depends(get_db)):
     # Update lead status
     if lead.status == "new":
         lead.status = "contacted"
-        lead.updated_at = datetime.datetime.utcnow()
+        lead.updated_at = datetime.datetime.now(datetime.timezone.utc)
 
     db.commit()
     return {"message_id": msg.id, "wa_result": result}
@@ -566,7 +578,7 @@ async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_d
     db.add(incoming)
 
     # Update lead tracking
-    lead.last_message_at = datetime.datetime.utcnow()
+    lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
     lead.unread_count = (lead.unread_count or 0) + 1
 
     db.commit()
@@ -933,7 +945,7 @@ def send_chat_message(lead_id: int, req: SendMessageRequest, db: Session = Depen
         is_read=True,
     )
     db.add(msg)
-    lead.last_message_at = datetime.datetime.utcnow()
+    lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
     if lead.status == "new":
         lead.status = "contacted"
     db.commit()
@@ -985,7 +997,7 @@ async def send_chat_media(
         is_read=True,
     )
     db.add(msg)
-    lead.last_message_at = datetime.datetime.utcnow()
+    lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
     if lead.status == "new":
         lead.status = "contacted"
     db.commit()
@@ -1032,7 +1044,7 @@ def simulate_incoming_message(req: SimulateMessageRequest, db: Session = Depends
         is_auto_replied=False,
     )
     db.add(incoming)
-    lead.last_message_at = datetime.datetime.utcnow()
+    lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
     lead.unread_count = (lead.unread_count or 0) + 1
     db.commit()
 
@@ -1118,7 +1130,7 @@ def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(
             is_read=True,
         )
         db.add(re_msg)
-        lead.last_message_at = datetime.datetime.utcnow()
+        lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
         db.commit()
         return {"status": "ok", "message": "Re-engagement template sent"}
     else:
@@ -1234,7 +1246,7 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
             is_auto_replied=False,
         )
         db.add(incoming)
-        lead.last_message_at = datetime.datetime.utcnow()
+        lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
         lead.unread_count = (lead.unread_count or 0) + 1
         db.commit()
 

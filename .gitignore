@@ -28,6 +28,8 @@ build/
 
 # Data and Databases
 data/leads.db
+data/leads.db-shm
+data/leads.db-wal
 backend/leads.db
 backend/local_crm.db
 data/chroma_db/

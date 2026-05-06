@@ -66,175 +66,247 @@ def stop_scheduler():
 
 def process_unread_messages():
     """
-    Process unread incoming messages:
-    1. Trigger welcome sequence for first-time leads
-    2. Detect location questions and send directions
-    3. Generate AI reply using RAG (knowledge base + properties)
-    4. Send reply via WhatsApp
+    ACID-safe unread message processor.
+    
+    Uses a claim-then-process pattern to prevent race conditions:
+    1. CLAIM: Atomically lock unclaimed messages (set processing_lock_at)
+    2. PROCESS: Generate AI reply for each claimed message
+    3. COMMIT: Mark as auto-replied and release lock in same transaction
+    
+    If a claim is older than LOCK_EXPIRY_SECONDS, it's considered stale
+    (crashed worker) and can be reclaimed by the next cycle.
     """
+    LOCK_EXPIRY_SECONDS = 120  # 2 minutes — enough for Ollama on CPU
+
     db = SessionLocal()
     try:
-        # Find unread incoming messages that haven't been auto-replied
-        unread = (
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lock_expiry = now - datetime.timedelta(seconds=LOCK_EXPIRY_SECONDS)
+
+        # ── STEP 1: CLAIM — Atomically lock unclaimed messages ──
+        # Only pick messages that are:
+        #   - incoming, not yet auto-replied
+        #   - NOT currently locked (processing_lock_at is NULL)
+        #   - OR locked but stale (processing_lock_at < lock_expiry)
+        from sqlalchemy import or_
+        unclaimed = (
             db.query(Message)
             .filter(
                 Message.direction == "in",
                 Message.is_auto_replied == False,
+                or_(
+                    Message.processing_lock_at == None,
+                    Message.processing_lock_at < lock_expiry,  # Stale lock — reclaim
+                ),
             )
             .order_by(Message.created_at.asc())
-            .limit(5)
+            .limit(10)
             .all()
         )
 
-        processed_leads = set()
-        for msg in unread:
-            lead = db.query(Lead).filter(Lead.id == msg.lead_id).first()
-            if not lead:
-                msg.is_auto_replied = True
-                continue
+        if not unclaimed:
+            db.close()
+            return
 
-            # Process only one message per lead per 10-second cycle to prevent overlapping replies
-            if lead.id in processed_leads:
-                continue
-            processed_leads.add(lead.id)
-
-            # Skip if auto-reply disabled for this lead
-            if not lead.auto_reply_enabled:
-                msg.is_auto_replied = True
-                continue
-
-            # Skip auto-reply for leads parsed from email (only reply to manual/whatsapp leads)
-            if lead.source not in ["manual", "whatsapp"]:
-                msg.is_auto_replied = True
-                continue
-
-            if not lead.phone:
-                msg.is_auto_replied = True
-                continue
-
-            # ── WELCOME SEQUENCE for first-time leads ──
-            if not lead.welcome_sent:
-                import threading
-                from welcome_sequence import send_welcome_sequence, get_welcome_db_messages
-
-                # Mark as sent immediately to prevent re-triggering by subsequent messages
-                lead.welcome_sent = True
-                db.commit()
-
-                def _run_welcome(phone_num, lead_id):
-                    try:
-                        result = send_welcome_sequence(phone_num)
-                        print(f"[Followup] Welcome sent to {phone_num}: {result}")
-                        wdb = SessionLocal()
-                        try:
-                            # We don't need to set welcome_sent=True here anymore, already done
-                            for m in get_welcome_db_messages():
-                                wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
-                                                content=m["content"], status="sent", is_read=True))
-                            wdb.commit()
-                        finally:
-                            wdb.close()
-                    except Exception as e:
-                        print(f"[Followup] Welcome error: {e}")
-
-                thread = threading.Thread(target=_run_welcome, args=(lead.phone, lead.id))
-                thread.daemon = True
-                thread.start()
-                msg.is_auto_replied = True
-                db.commit()
-                continue  # Don't send AI reply for the first message — welcome handles it
-
-            # ── Detect intent keywords ──
-            msg_lower = msg.content.lower()
-
-            # Location keywords
-            wants_location = any(kw in msg_lower for kw in [
-                'location', 'address', 'kaha', 'kahan', 'where', 'kidhar',
-                'pune me kaha', 'location kya', 'jagah', 'route', 'direction',
-                'kaise aaye', 'kaise aana', 'how to reach', 'come',
-            ])
-
-            # Media keywords (Expanded for all flat types and phrasing)
-            wants_media = any(kw in msg_lower for kw in [
-                'photo', 'photos', 'video', 'videos', 'image', 'images',
-                'pic', 'pics', 'picture', 'pictures', 'dekho', 'dikhao',
-                'send me', 'bhejo', 'share', 'visuals', 'dekhna',
-                'flat picture', 'flat photo', 'flat pic',
-                'property photo', 'property picture', 'property pic',
-                'propertie photo', 'propertie picture', 'propertie pic',
-                '1bhk', '2bhk', '2.5bhk', '3bhk', '4bhk', 'bhk',
-                'furnished', 'sample flat', 'layout', 'amenity', 'amenities',
-                'flat ka video', 'flat video', 'property video'
-            ])
-
-            # Build lead context
-            context_parts = []
-            if lead.budget_min or lead.budget_max:
-                context_parts.append(f"Budget: {lead.budget_min or ''} to {lead.budget_max or ''}L")
-            if lead.preferred_location:
-                context_parts.append(f"Location: {lead.preferred_location}")
-            if lead.property_type:
-                context_parts.append(f"Type: {lead.property_type}")
-            lead_context = ", ".join(context_parts)
-
-            # Fetch recent conversation history for this lead
-            recent_messages = (
-                db.query(Message)
-                .filter(Message.lead_id == lead.id)
-                .order_by(Message.created_at.desc())
-                .limit(20)
-                .all()
-            )
-            conversation_history = [
-                {"direction": m.direction, "content": m.content}
-                for m in reversed(recent_messages)
-                if m.content and not m.content.startswith("[IMAGE:") and not m.content.startswith("[VIDEO:")
-            ]
-
-            # ── LOCATION SEQUENCE ──
-            if wants_location:
-                _send_location_sequence(lead, db)
-                msg.is_auto_replied = True
-                db.commit()
-                continue
-
-            # ── Generate AI reply ──
-            reply_text = generate_rag_reply(
-                incoming_message=msg.content,
-                lead_name=lead.name,
-                lead_context=lead_context,
-                conversation_history=conversation_history,
-            )
-
-            if reply_text and not reply_text.startswith("["):
-                # Send via WhatsApp
-                result = send_whatsapp_message(lead.phone, reply_text)
-
-                # Store outgoing message
-                outgoing = Message(
-                    lead_id=lead.id, direction="out", channel="whatsapp",
-                    content=reply_text,
-                    status="sent" if result.get("success") or result.get("mock") else "failed",
-                    wa_message_id=result.get("message_id", ""),
-                    is_read=True,
-                )
-                db.add(outgoing)
-
-                # If user asked for media, send photos and videos
-                if wants_media:
-                    _send_media_on_request(lead, db)
-
-                # Update lead
-                lead.last_message_at = datetime.datetime.utcnow()
-                if lead.status == "new":
-                    lead.status = "contacted"
-
-                print(f"Auto-replied to {lead.name}: {reply_text[:60]}...")
-
-            # Mark incoming message as auto-replied
-            msg.is_auto_replied = True
-
+        # Lock them atomically — set processing_lock_at to NOW
+        claimed_ids = [m.id for m in unclaimed]
+        db.query(Message).filter(Message.id.in_(claimed_ids)).update(
+            {"processing_lock_at": now}, synchronize_session="fetch"
+        )
         db.commit()
+
+        # ── STEP 2: PROCESS — Group by lead, handle ALL messages per lead ──
+        from collections import defaultdict
+        lead_messages = defaultdict(list)
+        for msg in unclaimed:
+            lead_messages[msg.lead_id].append(msg)
+
+        for lead_id, msgs in lead_messages.items():
+            try:
+                # Re-fetch all messages to ensure consistency
+                msg_ids = [m.id for m in msgs]
+                msgs = db.query(Message).filter(Message.id.in_(msg_ids), Message.is_auto_replied == False).order_by(Message.created_at.asc()).all()
+                if not msgs:
+                    continue
+
+                lead = db.query(Lead).filter(Lead.id == lead_id).first()
+                if not lead:
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
+
+                # Skip if auto-reply disabled for this lead
+                if not lead.auto_reply_enabled:
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
+
+                # Skip auto-reply for leads parsed from email (only reply to manual/whatsapp leads)
+                if lead.source not in ["manual", "whatsapp"]:
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
+
+                if not lead.phone:
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
+
+                # ── WELCOME SEQUENCE for first-time leads ──
+                if not lead.welcome_sent:
+                    import threading
+                    from welcome_sequence import send_welcome_sequence, get_welcome_db_messages
+
+                    # Mark as sent immediately to prevent re-triggering by subsequent messages
+                    lead.welcome_sent = True
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+
+                    def _run_welcome(phone_num, lead_id_inner):
+                        try:
+                            result = send_welcome_sequence(phone_num)
+                            print(f"[Followup] Welcome sent to {phone_num}: {result}")
+                            wdb = SessionLocal()
+                            try:
+                                for m in get_welcome_db_messages():
+                                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                                    content=m["content"], status="sent", is_read=True))
+                                wdb.commit()
+                            finally:
+                                wdb.close()
+                        except Exception as e:
+                            print(f"[Followup] Welcome error: {e}")
+
+                    thread = threading.Thread(target=_run_welcome, args=(lead.phone, lead.id))
+                    thread.daemon = True
+                    thread.start()
+                    continue  # Don't send AI reply for the first message — welcome handles it
+
+                # ── Combine ALL pending messages for intent detection + AI context ──
+                combined_msg_text = "\n".join(m.content for m in msgs if m.content)
+                combined_lower = combined_msg_text.lower()
+
+                # Location keywords — check across ALL messages
+                wants_location = any(kw in combined_lower for kw in [
+                    'location', 'address', 'kaha', 'kahan', 'where', 'kidhar',
+                    'pune me kaha', 'location kya', 'jagah', 'route', 'direction',
+                    'kaise aaye', 'kaise aana', 'how to reach', 'come',
+                ])
+
+                # Media keywords — SPECIFIC phrases only to avoid false positives
+                wants_media = any(kw in combined_lower for kw in [
+                    'photo', 'photos', 'video', 'videos', 'image', 'images',
+                    'pic', 'pics', 'picture', 'pictures', 'dekho', 'dikhao',
+                    'bhejo photo', 'bhejo video', 'visuals', 'dekhna',
+                    'share photo', 'share video', 'share pic', 'share image',
+                    'send photo', 'send video', 'send pic', 'send image',
+                    'flat picture', 'flat photo', 'flat pic',
+                    'property photo', 'property picture', 'property pic',
+                    'propertie photo', 'propertie picture', 'propertie pic',
+                    'sample flat', 'layout',
+                    'flat ka video', 'flat video', 'property video'
+                ])
+
+                # Build lead context
+                context_parts = []
+                if lead.budget_min or lead.budget_max:
+                    context_parts.append(f"Budget: {lead.budget_min or ''} to {lead.budget_max or ''}L")
+                if lead.preferred_location:
+                    context_parts.append(f"Location: {lead.preferred_location}")
+                if lead.property_type:
+                    context_parts.append(f"Type: {lead.property_type}")
+                lead_context = ", ".join(context_parts)
+
+                # Fetch recent conversation history for this lead
+                recent_messages = (
+                    db.query(Message)
+                    .filter(Message.lead_id == lead.id)
+                    .order_by(Message.created_at.desc())
+                    .limit(20)
+                    .all()
+                )
+                conversation_history = [
+                    {"direction": m.direction, "content": m.content}
+                    for m in reversed(recent_messages)
+                    if m.content and not m.content.startswith("[IMAGE:") and not m.content.startswith("[VIDEO:")
+                ]
+
+                # ── LOCATION SEQUENCE ──
+                if wants_location:
+                    _send_location_sequence(lead, db)
+
+                # ── Generate AI reply addressing ALL pending messages ──
+                # If multiple messages, tell AI about all of them
+                if len(msgs) == 1:
+                    ai_input = msgs[0].content
+                else:
+                    ai_input = "Customer sent multiple messages:\n" + "\n".join(
+                        f"- {m.content}" for m in msgs if m.content
+                    ) + "\n\nRespond to ALL of the above messages in one reply. Address every point — whether it is a question, request, or statement."
+
+                reply_text = generate_rag_reply(
+                    incoming_message=ai_input,
+                    lead_name=lead.name,
+                    lead_context=lead_context,
+                    conversation_history=conversation_history,
+                )
+
+                if reply_text and not reply_text.startswith("["):
+                    # ── STEP 3: COMMIT — Send + mark ALL as replied atomically ──
+                    result = send_whatsapp_message(lead.phone, reply_text)
+
+                    # Store outgoing message
+                    outgoing = Message(
+                        lead_id=lead.id, direction="out", channel="whatsapp",
+                        content=reply_text,
+                        status="sent" if result.get("success") or result.get("mock") else "failed",
+                        wa_message_id=result.get("message_id", ""),
+                        is_read=True,
+                    )
+                    db.add(outgoing)
+
+                    # If user asked for media, send photos and videos
+                    if wants_media:
+                        _send_media_on_request(lead, db)
+
+                    # Update lead
+                    lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
+                    if lead.status == "new":
+                        lead.status = "contacted"
+
+                    print(f"Auto-replied to {lead.name} ({len(msgs)} msgs): {reply_text[:60]}...")
+
+                # Mark ALL incoming messages as auto-replied and release locks
+                for m in msgs:
+                    m.is_auto_replied = True
+                    m.processing_lock_at = None
+                db.commit()
+
+            except Exception as msg_err:
+                # Per-lead error handling — release locks so messages can be retried
+                print(f"Error processing lead {lead_id} messages: {msg_err}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    db.rollback()
+                    for m in msgs:
+                        msg_fresh = db.query(Message).filter(Message.id == m.id).first()
+                        if msg_fresh:
+                            msg_fresh.processing_lock_at = None
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
     except Exception as e:
         print(f"Unread processing error: {e}")
         import traceback
@@ -370,7 +442,7 @@ def process_followups():
     """Process all due follow-ups."""
     db = SessionLocal()
     try:
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         due_followups = (
             db.query(FollowUpSchedule)
             .filter(
@@ -423,7 +495,7 @@ def process_followups():
                 fup.is_active = False
 
             # Update lead last_message_at
-            lead.last_message_at = datetime.datetime.utcnow()
+            lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
 
             print(f"Follow-up sent to {lead.name} ({lead.phone}) - #{fup.followups_sent}")
 
@@ -454,7 +526,7 @@ def create_followup_schedule(
     schedule = FollowUpSchedule(
         lead_id=lead_id,
         frequency_hours=frequency_hours,
-        next_followup_at=datetime.datetime.utcnow() + datetime.timedelta(hours=frequency_hours),
+        next_followup_at=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=frequency_hours),
         message_template=message_template,
         max_followups=max_followups,
     )

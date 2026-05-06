@@ -509,20 +509,53 @@ $('btn-wa-send').addEventListener('click', sendChatMessage);
 $('wa-msg-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChatMessage(); });
 
 // ─── Gallery Lightbox: Event Delegation ───────────────────────────────────
-// Handles clicks on gallery items dynamically rendered into wa-messages
+// Handles clicks on gallery items AND standalone media in wa-messages
 $('wa-messages').addEventListener('click', e => {
+    // 1. Gallery item click
     const item = e.target.closest('.wa-gallery-item');
-    if (!item) return;
-    const gallery = item.closest('.wa-media-gallery');
-    if (!gallery) return;
-    const groupKey = gallery.getAttribute('data-media-group');
-    if (!groupKey) return;
-    const idx = parseInt(item.getAttribute('data-idx') || '0', 10);
-    try {
-        const contents = JSON.parse(decodeURIComponent(groupKey));
-        openMediaViewer(contents, idx);
-    } catch (err) {
-        console.error('Gallery open error:', err);
+    if (item) {
+        const gallery = item.closest('.wa-media-gallery');
+        if (gallery) {
+            const groupKey = gallery.getAttribute('data-media-group');
+            if (groupKey) {
+                const idx = parseInt(item.getAttribute('data-idx') || '0', 10);
+                try {
+                    const contents = JSON.parse(decodeURIComponent(groupKey));
+                    openMediaViewer(contents, idx);
+                } catch (err) {
+                    console.error('Gallery open error:', err);
+                }
+                return;
+            }
+        }
+    }
+
+    // 2. Standalone image click (from renderMsgContent)
+    const imgEl = e.target.closest('.wa-media-img');
+    if (imgEl) {
+        const img = imgEl.querySelector('img');
+        if (img) {
+            const src = img.getAttribute('src') || '';
+            // Extract filename from src like /media/amenities/fname.jpg
+            const fname = src.split('/').pop();
+            const isAmenity = src.includes('/amenities/');
+            const token = `[IMAGE:${fname}]`;
+            openMediaViewer([token], 0);
+            return;
+        }
+    }
+
+    // 3. Standalone video click (from renderMsgContent)
+    const vidEl = e.target.closest('.wa-media-vid');
+    if (vidEl) {
+        const vid = vidEl.querySelector('video');
+        if (vid) {
+            const src = vid.getAttribute('src') || '';
+            const fname = src.split('/').pop();
+            const token = `[VIDEO:${fname}]`;
+            openMediaViewer([token], 0);
+            return;
+        }
     }
 });
 

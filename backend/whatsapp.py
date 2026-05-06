@@ -12,6 +12,14 @@ WA_PHONE_NUMBER_ID = os.getenv("WA_PHONE_NUMBER_ID", "")
 WA_ACCESS_TOKEN = os.getenv("WA_ACCESS_TOKEN", "")
 WA_VERIFY_TOKEN = os.getenv("WA_VERIFY_TOKEN", "leadbot_verify_2024")
 
+class WhatsAppError(Exception):
+    """Base class for WhatsApp errors."""
+    pass
+
+class AuthenticationError(WhatsAppError):
+    """Raised when the Access Token is expired or invalid."""
+    pass
+
 
 def send_whatsapp_message(to_phone: str, message: str = "", media_id: str = None, media_type: str = "image") -> dict:
     """
@@ -80,16 +88,34 @@ def upload_whatsapp_media(file_bytes: bytes, mime_type: str, filename: str) -> O
         "messaging_product": "whatsapp"
     }
 
-    try:
-        r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
-        if r.status_code == 200:
-            return r.json().get("id")
-        else:
-            print(f"WA Media upload failed: {r.json()}")
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+            if r.status_code == 200:
+                return r.json().get("id")
+            else:
+                resp = r.json()
+                error_data = resp.get("error", {})
+                error_code = error_data.get("code")
+                error_msg = error_data.get("message", "")
+                
+                if error_code == 190:
+                    print(f"CRITICAL: WhatsApp Access Token EXPIRED or INVALID. Update WA_ACCESS_TOKEN in .env. (ID: {filename})")
+                    raise AuthenticationError("WhatsApp Access Token expired or invalid")
+                else:
+                    print(f"WA Media upload failed: {resp}")
+                return None
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < max_retries:
+                print(f"WA Media upload network error, retrying ({attempt+1}/{max_retries})...")
+                continue
+            print(f"WA Media upload error after {max_retries} retries: {e}")
             return None
-    except Exception as e:
-        print(f"WA Media upload error: {e}")
-        return None
+        except Exception as e:
+            print(f"WA Media upload unexpected error: {e}")
+            return None
+    return None
 
 
 def send_whatsapp_template(to_phone: str, template_name: str, language: str = "en") -> dict:

@@ -207,12 +207,18 @@ def send_welcome_sequence(phone: str) -> dict:
 
     # ── Step 3: Send ALL amenity photos ──
     photos = get_amenity_photos()
-    for photo_path in photos:
-        if _send_photo(phone, photo_path):
-            results["photos"] += 1
-        else:
-            results["errors"].append(f"Photo failed: {os.path.basename(photo_path)}")
-        time.sleep(1)  # 1s between photos
+    from whatsapp import AuthenticationError
+    try:
+        for photo_path in photos:
+            if _send_photo(phone, photo_path):
+                results["photos"] += 1
+            else:
+                results["errors"].append(f"Photo failed: {os.path.basename(photo_path)}")
+            time.sleep(1)  # 1s between photos
+    except AuthenticationError:
+        print(f"[Welcome] Aborting sequence for {phone} due to Authentication Error.")
+        results["errors"].append("Authentication failed")
+        return results
 
     print(f"[Welcome] {len(photos)} photos sent to {phone}. Waiting 30s before videos...")
 
@@ -227,12 +233,17 @@ def send_welcome_sequence(phone: str) -> dict:
         time.sleep(1)
 
         # ── Step 6: Send ALL flat videos ──
-        for video_path in videos:
-            if _send_video(phone, video_path):
-                results["videos"] += 1
-            else:
-                results["errors"].append(f"Video failed: {os.path.basename(video_path)}")
-            time.sleep(5)  # 5s between videos (larger files)
+        try:
+            for video_path in videos:
+                if _send_video(phone, video_path):
+                    results["videos"] += 1
+                else:
+                    results["errors"].append(f"Video failed: {os.path.basename(video_path)}")
+                time.sleep(5)  # 5s between videos (larger files)
+        except AuthenticationError:
+            print(f"[Welcome] Aborting video sequence for {phone} due to Authentication Error.")
+            results["errors"].append("Authentication failed during videos")
+            return results
 
         print(f"[Welcome] {len(videos)} videos sent to {phone}. Waiting 60s before final msg...")
 

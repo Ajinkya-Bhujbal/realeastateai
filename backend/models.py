@@ -29,8 +29,8 @@ class Lead(Base):
     unread_count = Column(Integer, default=0)
     auto_reply_enabled = Column(Boolean, default=True)
     welcome_sent = Column(Boolean, default=False)  # Has welcome sequence been sent?
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     messages = relationship("Message", back_populates="lead", cascade="all, delete-orphan")
     followups = relationship("FollowUpSchedule", back_populates="lead", cascade="all, delete-orphan")
@@ -47,8 +47,9 @@ class Message(Base):
     status = Column(String(20), default="sent")  # sent, delivered, read, failed
     is_read = Column(Boolean, default=False)  # has agent seen this message
     is_auto_replied = Column(Boolean, default=False)  # was auto-reply sent for this
+    processing_lock_at = Column(DateTime, nullable=True)  # ACID: lock timestamp for concurrent processing
     wa_message_id = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     lead = relationship("Lead", back_populates="messages")
 
@@ -67,7 +68,7 @@ class Property(Base):
     amenities = Column(Text, nullable=True)  # comma-separated
     builder = Column(String(200), nullable=True)
     status = Column(String(30), default="available")  # available, sold, upcoming
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class FollowUpSchedule(Base):
@@ -81,6 +82,6 @@ class FollowUpSchedule(Base):
     is_active = Column(Boolean, default=True)
     max_followups = Column(Integer, default=5)
     followups_sent = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     lead = relationship("Lead", back_populates="followups")
