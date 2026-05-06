@@ -33,6 +33,49 @@ async function api(path, opts = {}) {
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
 
+/** Render message content with media (images, videos, links) */
+function renderMsgContent(content) {
+    if (!content) return '';
+
+    // [IMAGE:filename] → render as thumbnail
+    const imgMatch = content.match(/^\[IMAGE:(.+?)\]$/);
+    if (imgMatch) {
+        const fname = imgMatch[1];
+        // Determine subfolder: amenity or flat
+        const isAmenity = fname.toLowerCase().includes('amenity') || fname.toLowerCase().includes('pool')
+            || fname.toLowerCase().includes('gym') || fname.toLowerCase().includes('lounge')
+            || fname.toLowerCase().includes('ground') || fname.toLowerCase().includes('kids')
+            || fname.toLowerCase().includes('indoor') || fname.toLowerCase().includes('yoga')
+            || fname.toLowerCase().includes('reading') || fname.toLowerCase().includes('work');
+        const folder = isAmenity ? 'amenities' : 'flats';
+        const src = `/media/${folder}/${fname}`;
+        return `<div class="wa-media-img" onclick="window.open('${src}','_blank')">
+            <img src="${src}" alt="${esc(fname)}" loading="lazy" />
+        </div>`;
+    }
+
+    // [VIDEO:filename] → render as video player
+    const vidMatch = content.match(/^\[VIDEO:(.+?)\]$/);
+    if (vidMatch) {
+        const fname = vidMatch[1];
+        const src = `/media/flats/${fname}`;
+        return `<div class="wa-media-vid">
+            <video src="${src}" controls preload="metadata" style="max-width:100%;border-radius:8px;"></video>
+            <div class="wa-media-label">🎬 ${esc(fname)}</div>
+        </div>`;
+    }
+
+    // Regular text: escape, linkify URLs, and preserve newlines
+    let safe = esc(content);
+    // Linkify URLs
+    safe = safe.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener" style="color:#53bdeb;word-break:break-all;">$1</a>');
+    // Bold: *text*
+    safe = safe.replace(/\*([^*]+?)\*/g, '<strong>$1</strong>');
+    // Preserve newlines
+    safe = safe.replace(/\n/g, '<br>');
+    return safe;
+}
+
 function timeAgo(iso) {
     if (!iso) return '';
     // Ensure we treat the timestamp as UTC
@@ -131,7 +174,7 @@ async function loadLeads() {
     const d = await api(url);
     if (!d) return;
     const tb = $('leads-tbody');
-    if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="8" class="empty-state">No leads found</td></tr>'; return; }
+    if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="10" class="empty-state">No leads found</td></tr>'; return; }
     tb.innerHTML = d.leads.map(l => `
         <tr>
             <td><strong>${esc(l.name)}</strong>${l.email ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(l.email) + '</span>' : ''}</td>
@@ -141,6 +184,12 @@ async function loadLeads() {
             <td>${esc(l.price || (l.budget_min || l.budget_max ? (l.budget_min || '?') + '-' + (l.budget_max || '?') + 'L' : '-'))}</td>
             <td>${esc(l.preferred_location || '-')}</td>
             <td class="time-ago-cell" data-created="${l.created_at || ''}" style="font-size:12px;color:var(--text-secondary)">${timeAgo(l.created_at)}</td>
+            <td style="text-align:center">
+                <input type="checkbox" class="welcome-cb" ${l.welcome_sent ? 'checked' : ''}
+                    onclick="toggleWelcome(${l.id}, ${l.welcome_sent ? 'true' : 'false'}, '${esc(l.phone || '')}')"
+                    title="${l.welcome_sent ? 'Welcome sent ✓' : 'Click to send welcome sequence'}"
+                    style="cursor:pointer;width:18px;height:18px;accent-color:#22c55e;" />
+            </td>
             <td>
                 <select class="input tag-select" onchange="updateTag(${l.id}, this)">
                     <option value="NEW" ${l.tag === 'NEW' ? 'selected' : ''}>NEW</option>
@@ -198,6 +247,39 @@ window.updateTag = async function (id, selectEl) {
         body: { tag: tagValue }
     });
     toast('Tag updated');
+};
+
+window.toggleWelcome = async function (leadId, alreadySent, phone) {
+    if (!phone || phone === '-') {
+        toast('No phone number for this lead', 'error');
+        return;
+    }
+    if (alreadySent) {
+        // Already sent — offer to re-engage
+        if (!confirm('Welcome already sent. Send a re-engagement message?\n(WhatsApp requires 24hr gap between template messages)')) {
+            loadLeads(); // reset checkbox
+            return;
+        }
+        const r = await api(`/api/leads/${leadId}/force-welcome`, { method: 'POST', body: { re_engage: true } });
+        if (r && r.status === 'ok') {
+            toast('Re-engagement message queued!');
+        } else {
+            toast(r?.error || 'Failed to send', 'error');
+        }
+    } else {
+        // Not sent — send welcome sequence
+        if (!confirm('Send welcome sequence with photos & videos to this lead?')) {
+            loadLeads(); // reset checkbox
+            return;
+        }
+        const r = await api(`/api/leads/${leadId}/force-welcome`, { method: 'POST', body: { re_engage: false } });
+        if (r && r.status === 'ok') {
+            toast('Welcome sequence started! Photos & videos sending...');
+        } else {
+            toast(r?.error || 'Failed to send', 'error');
+        }
+    }
+    setTimeout(loadLeads, 2000);
 };
 
 // ─── Add Lead Modal ──────────────────────
@@ -335,24 +417,78 @@ window.selectChat = async function (leadId) {
     autoLabel.textContent = autoOn ? 'Auto: ON' : 'Auto: OFF';
     autoLabel.className = `wa-auto-label ${autoOn ? 'on' : 'off'}`;
 
-    // Render messages
+    // Render messages with media gallery clustering
     const box = $('wa-messages');
     if (!d.messages || d.messages.length === 0) {
         box.innerHTML = '<div class="wa-empty-chat"><div class="wa-empty-icon">💬</div><h3>No messages</h3><p>Send a message to start the conversation</p></div>';
     } else {
         let html = '';
         let lastDate = '';
-        for (const m of d.messages) {
+        const msgs = d.messages;
+        let i = 0;
+        while (i < msgs.length) {
+            const m = msgs[i];
             const msgDate = m.created_at ? new Date(m.created_at + (m.created_at.includes('Z') ? '' : 'Z')).toLocaleDateString() : '';
             if (msgDate && msgDate !== lastDate) {
                 html += `<div class="wa-date-divider">${msgDate}</div>`;
                 lastDate = msgDate;
             }
-            html += `<div class="wa-msg-bubble ${m.direction}">
-                ${esc(m.content)}
-                <div class="wa-msg-time">${formatTime(m.created_at)}</div>
-                ${m.direction === 'out' && m.is_auto_replied === false && m.content ? '' : ''}
-            </div>`;
+
+            // Check if this is a media message
+            const isMedia = m.content && (m.content.match(/^\[IMAGE:.+\]$/) || m.content.match(/^\[VIDEO:.+\]$/));
+
+            if (isMedia) {
+                // Collect consecutive media messages with same direction
+                const mediaGroup = [];
+                while (i < msgs.length) {
+                    const mc = msgs[i];
+                    if (mc.content && (mc.content.match(/^\[IMAGE:.+\]$/) || mc.content.match(/^\[VIDEO:.+\]$/)) && mc.direction === m.direction) {
+                        mediaGroup.push(mc);
+                        i++;
+                    } else break;
+                }
+                // Render as gallery
+                const SHOW_MAX = 4;
+                const remaining = mediaGroup.length - SHOW_MAX;
+                html += `<div class="wa-msg-bubble ${m.direction} wa-media-gallery-bubble">`;
+                html += `<div class="wa-media-gallery">`;
+                mediaGroup.slice(0, SHOW_MAX).forEach((mc, idx) => {
+                    const isLast = idx === SHOW_MAX - 1 && remaining > 0;
+                    const imgMatch = mc.content.match(/^\[IMAGE:(.+?)\]$/);
+                    const vidMatch = mc.content.match(/^\[VIDEO:(.+?)\]$/);
+                    if (imgMatch) {
+                        const fname = imgMatch[1];
+                        const fl = fname.toLowerCase();
+                        const isAmenity = fl.includes('amenity') || fl.includes('pool') || fl.includes('gym')
+                            || fl.includes('lounge') || fl.includes('ground') || fl.includes('kids')
+                            || fl.includes('indoor') || fl.includes('yoga') || fl.includes('reading') || fl.includes('work')
+                            || fl.includes('multipurpose');
+                        const folder = isAmenity ? 'amenities' : 'flats';
+                        const src = `/media/${folder}/${fname}`;
+                        html += `<div class="wa-gallery-item${isLast ? ' wa-gallery-more' : ''}" onclick="openMediaViewer(${JSON.stringify(mediaGroup.map(x=>x.content))}, ${idx})">
+                            <img src="${src}" alt="${esc(fname)}" loading="lazy" />
+                            ${isLast ? `<div class="wa-gallery-overlay">+${remaining}</div>` : ''}
+                        </div>`;
+                    } else if (vidMatch) {
+                        const fname = vidMatch[1];
+                        const src = `/media/flats/${fname}`;
+                        html += `<div class="wa-gallery-item${isLast ? ' wa-gallery-more' : ''}" onclick="openMediaViewer(${JSON.stringify(mediaGroup.map(x=>x.content))}, ${idx})">
+                            <video src="${src}" preload="metadata"></video>
+                            <div class="wa-gallery-play">▶</div>
+                            ${isLast ? `<div class="wa-gallery-overlay">+${remaining}</div>` : ''}
+                        </div>`;
+                    }
+                });
+                html += `</div>`;
+                html += `<div class="wa-msg-time">${formatTime(m.created_at)}</div></div>`;
+            } else {
+                // Normal text message
+                html += `<div class="wa-msg-bubble ${m.direction}">
+                    ${renderMsgContent(m.content)}
+                    <div class="wa-msg-time">${formatTime(m.created_at)}</div>
+                </div>`;
+                i++;
+            }
         }
         box.innerHTML = html;
         box.scrollTop = box.scrollHeight;
@@ -470,18 +606,19 @@ function startChatPolling() {
     stopChatPolling();
     chatPollTimer = setInterval(async () => {
         await loadChats();
-        // If a chat is open, refresh messages
+        // If a chat is open, check for NEW messages only
         if (currentLeadId) {
             const d = await api(`/api/chats/${currentLeadId}`, { silent: true });
             if (d && d.messages) {
                 const box = $('wa-messages');
-                const currentCount = box.querySelectorAll('.wa-msg-bubble').length;
+                const currentCount = box.querySelectorAll('.wa-msg-bubble, .wa-media-gallery-bubble').length;
+                // Only re-render if message count actually changed
                 if (d.messages.length !== currentCount) {
                     selectChat(currentLeadId);
                 }
             }
         }
-    }, 3000);
+    }, 5000);  // 5 seconds instead of 3 to reduce flashing
 }
 
 function stopChatPolling() {
@@ -572,3 +709,68 @@ setInterval(() => {
         // These get refreshed on dashboard reload, no action needed here
     });
 }, 5000);
+
+// ─── Media Viewer (Lightbox) ────────────────────
+function _getMediaSrc(content) {
+    const imgMatch = content.match(/^\[IMAGE:(.+?)\]$/);
+    if (imgMatch) {
+        const fname = imgMatch[1];
+        const fl = fname.toLowerCase();
+        const isAmenity = fl.includes('amenity') || fl.includes('pool') || fl.includes('gym')
+            || fl.includes('lounge') || fl.includes('ground') || fl.includes('kids')
+            || fl.includes('indoor') || fl.includes('yoga') || fl.includes('reading')
+            || fl.includes('work') || fl.includes('multipurpose');
+        return { type: 'image', src: `/media/${isAmenity ? 'amenities' : 'flats'}/${fname}`, name: fname };
+    }
+    const vidMatch = content.match(/^\[VIDEO:(.+?)\]$/);
+    if (vidMatch) {
+        return { type: 'video', src: `/media/flats/${vidMatch[1]}`, name: vidMatch[1] };
+    }
+    return null;
+}
+
+function openMediaViewer(mediaContents, startIdx) {
+    // Remove existing viewer
+    const existing = document.getElementById('media-viewer');
+    if (existing) existing.remove();
+
+    let currentIdx = startIdx || 0;
+    const viewer = document.createElement('div');
+    viewer.id = 'media-viewer';
+    viewer.innerHTML = `
+        <div class="mv-backdrop" onclick="document.getElementById('media-viewer').remove()"></div>
+        <div class="mv-content">
+            <button class="mv-close" onclick="document.getElementById('media-viewer').remove()">&times;</button>
+            <button class="mv-prev" onclick="mvNav(-1)">‹</button>
+            <div class="mv-display" id="mv-display"></div>
+            <button class="mv-next" onclick="mvNav(1)">›</button>
+            <div class="mv-counter" id="mv-counter"></div>
+        </div>`;
+    document.body.appendChild(viewer);
+
+    function renderMedia() {
+        const info = _getMediaSrc(mediaContents[currentIdx]);
+        const display = document.getElementById('mv-display');
+        if (info.type === 'image') {
+            display.innerHTML = `<img src="${info.src}" alt="${info.name}" />`;
+        } else {
+            display.innerHTML = `<video src="${info.src}" controls autoplay></video>`;
+        }
+        document.getElementById('mv-counter').textContent = `${currentIdx + 1} / ${mediaContents.length}`;
+    }
+
+    window.mvNav = (dir) => {
+        currentIdx = (currentIdx + dir + mediaContents.length) % mediaContents.length;
+        renderMedia();
+    };
+
+    renderMedia();
+
+    // Close on Escape
+    const escHandler = (e) => {
+        if (e.key === 'Escape') { viewer.remove(); document.removeEventListener('keydown', escHandler); }
+        if (e.key === 'ArrowLeft') window.mvNav(-1);
+        if (e.key === 'ArrowRight') window.mvNav(1);
+    };
+    document.addEventListener('keydown', escHandler);
+}

@@ -34,7 +34,7 @@ def list_models() -> list:
     return []
 
 
-def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300) -> str:
+def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300, temperature: float = 0.7) -> str:
     """Generate text using Ollama. Keeps prompts short for low RAM usage."""
     try:
         r = requests.post(
@@ -45,9 +45,9 @@ def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300) -> 
                 "stream": False,
                 "options": {
                     "num_predict": max_tokens,
-                    "temperature": 0.7,
+                    "temperature": temperature,
                     "top_p": 0.9,
-                    "num_ctx": 1024,  # Small context window for RAM savings
+                    "num_ctx": 4096,  # Gemma2 9B can handle 8192; 4096 is safe for RAM
                 },
             },
             timeout=120,
@@ -116,50 +116,72 @@ Reply (be helpful, professional, brief):"""
     return generate(prompt, max_tokens=150)
 
 
+def _load_full_knowledge_base() -> str:
+    """Load the entire knowledge base from disk so the AI always has full context."""
+    kb_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "knowledge_base")
+    kb_text = ""
+    if os.path.isdir(kb_dir):
+        for fname in os.listdir(kb_dir):
+            if fname.endswith((".txt", ".md")):
+                fpath = os.path.join(kb_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                        kb_text += f.read() + "\n"
+                except Exception:
+                    pass
+    return kb_text.strip()
+
+
 def generate_rag_reply(
     incoming_message: str,
     lead_name: str,
     lead_context: str = "",
     kb_results: list = None,
     property_results: list = None,
+    conversation_history: list = None,
 ) -> str:
     """
-    Generate an AI reply using RAG context from knowledge base + properties.
-    This is the primary auto-reply function for incoming WhatsApp messages.
+    Generate an AI reply using the FULL knowledge base injected into the prompt.
+    Supports Hinglish/Marathi detection and uses last 20 messages for context.
     """
-    # Build knowledge context
-    kb_context = ""
-    if kb_results:
-        kb_snippets = []
-        for r in kb_results[:3]:
-            kb_snippets.append(r.get("text", "")[:400])
-        kb_context = "\n".join(kb_snippets)
+    # Load the FULL knowledge base (small file, ~7KB — fits easily)
+    full_kb = _load_full_knowledge_base()
 
-    # Build property context
-    prop_context = ""
-    if property_results:
-        for p in property_results[:3]:
-            prop_context += f"- {p.get('title', '')} in {p.get('location', '')}, Rs {p.get('price', '')}L, {p.get('bedrooms', '')}BHK\n"
+    # Build recent conversation history (last 20 messages for context)
+    history_text = ""
+    if conversation_history:
+        recent = conversation_history[-20:]
+        lines = []
+        for m in recent:
+            role = "Customer" if m.get("direction") == "in" else "You"
+            lines.append(f"{role}: {m.get('content', '')[:250]}")
+        history_text = "\n".join(lines)
 
-    prompt = f"""You are an AI assistant for a real estate company. Reply to this WhatsApp message in 2-4 lines.
-IMPORTANT RULES:
-- ONLY use facts from the Company Info and Property Data sections below. Do NOT invent company names, prices, or locations.
-- If the info is not available below, say you will check and get back to them.
-- Be warm, professional, and brief (WhatsApp style).
-- Use Indian Rupees (Lakhs/Crores) for pricing.
+    prompt = f"""You are a WhatsApp sales agent for Armstrong Properties — the biggest property broker at Shapoorji Pallonji Vanaha Township, Bavdhan, Pune. Phase 1 is called Yahavi.
 
-From: {lead_name}
-Message: {incoming_message[:300]}
-{f'Lead info: {lead_context[:200]}' if lead_context else ''}
+=== COMPANY KNOWLEDGE BASE ===
+{full_kb[:5500]}
+=== END ===
 
---- Company Info ---
-{kb_context[:800] if kb_context else 'No company info available.'}
+RULES:
+1. Use ONLY facts from the knowledge base above. Never invent prices, places, or details.
+2. If the customer writes in Hinglish (Hindi written in English) or Marathi written in English, reply in Hinglish.
+3. If the customer writes in English, reply in English.
+4. Keep replies SHORT — maximum 2-3 sentences. No long paragraphs.
+5. Give EXACT numbers: rent = 16k-28k, buy = 51L-1Cr, deposit = 2 months.
+6. If info is not in KB, say: "Ek min, team se check karke batata hu."
+7. Never add disclaimers, notes, or meta-commentary.
+8. Be warm, friendly, and direct — like a real broker on WhatsApp.
 
---- Property Data ---
-{prop_context[:500] if prop_context else 'No matching properties found.'}
+{f'CONVERSATION SO FAR:' if history_text else ''}
+{history_text}
 
-Reply:"""
-    return generate(prompt, max_tokens=250)
+Customer: {lead_name}
+{f'Preferences: {lead_context}' if lead_context else ''}
+Latest message: {incoming_message[:300]}
+
+Your reply:"""
+    return generate(prompt, max_tokens=200, temperature=0.1)
 
 
 def summarize_lead(lead_data: dict) -> str:

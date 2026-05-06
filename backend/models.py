@@ -28,6 +28,7 @@ class Lead(Base):
     last_message_at = Column(DateTime, nullable=True)
     unread_count = Column(Integer, default=0)
     auto_reply_enabled = Column(Boolean, default=True)
+    welcome_sent = Column(Boolean, default=False)  # Has welcome sequence been sent?
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 

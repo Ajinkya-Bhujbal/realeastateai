@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 # Add backend dir to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db import get_db, init_db
+from db import get_db, init_db, SessionLocal
 from models import Lead, Message, Property, FollowUpSchedule
 from parser import parse_lead_from_email, fetch_gmail_leads
 from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_message, upload_whatsapp_media
@@ -170,6 +170,11 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if os.path.exists(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
+# Serve media files (amenity photos, flat videos)
+MEDIA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "media")
+if os.path.exists(MEDIA_DIR):
+    app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
+
 
 # ─── Frontend Route ──────────────────────────────────────────────────
 
@@ -249,6 +254,7 @@ def list_leads(
                 "price": l.price,
                 "tag": l.tag,
                 "notes": l.notes,
+                "welcome_sent": l.welcome_sent if hasattr(l, 'welcome_sent') else False,
                 "created_at": l.created_at.isoformat() if l.created_at else None,
                 "updated_at": l.updated_at.isoformat() if l.updated_at else None,
             }
@@ -994,6 +1000,7 @@ def simulate_incoming_message(req: SimulateMessageRequest, db: Session = Depends
             source="whatsapp",
             status="new",
             auto_reply_enabled=True,
+            welcome_sent=False,
         )
         db.add(lead)
         db.commit()
@@ -1012,6 +1019,37 @@ def simulate_incoming_message(req: SimulateMessageRequest, db: Session = Depends
     lead.last_message_at = datetime.datetime.utcnow()
     lead.unread_count = (lead.unread_count or 0) + 1
     db.commit()
+
+    # Trigger welcome sequence for first-time leads
+    if not lead.welcome_sent:
+        import threading
+        from welcome_sequence import send_welcome_sequence
+
+        def _run_welcome(phone_num, lead_id):
+            try:
+                result = send_welcome_sequence(phone_num)
+                print(f"Welcome sequence sent to {phone_num}: {result}")
+                wdb = SessionLocal()
+                try:
+                    wlead = wdb.query(Lead).filter(Lead.id == lead_id).first()
+                    if wlead:
+                        wlead.welcome_sent = True
+                        from welcome_sequence import get_welcome_db_messages
+                        for m in get_welcome_db_messages():
+                            wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
+                                            content=m["content"], status="sent", is_read=True))
+                    wdb.commit()
+                finally:
+                    wdb.close()
+            except Exception as e:
+                print(f"Welcome sequence error: {e}")
+
+        incoming.is_auto_replied = True
+        db.commit()
+        thread = threading.Thread(target=_run_welcome, args=(phone_clean, lead.id))
+        thread.daemon = True
+        thread.start()
+
     return {"status": "ok", "lead_id": lead.id, "message": "Incoming message simulated"}
 
 
@@ -1032,6 +1070,69 @@ def get_total_unread(db: Session = Depends(get_db)):
     from sqlalchemy import func
     total = db.query(func.sum(Lead.unread_count)).scalar() or 0
     return {"total_unread": int(total)}
+
+
+class ForceWelcomeRequest(BaseModel):
+    re_engage: bool = False
+
+
+@app.post("/api/leads/{lead_id}/force-welcome")
+def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(get_db)):
+    """Force-send welcome sequence or re-engage a lead."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if not lead.phone:
+        return {"status": "error", "error": "Lead has no phone number"}
+
+    phone = lead.phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+    if len(phone) > 10:
+        phone = phone[-10:]
+
+    if req.re_engage:
+        # Send a WhatsApp template to re-open the 24hr conversation window
+        from whatsapp import send_whatsapp_template
+        template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
+        result = send_whatsapp_template(phone, template_name)
+        # Store in DB
+        re_msg = Message(
+            lead_id=lead.id, direction="out", channel="whatsapp",
+            content=f"[Re-engagement template sent: {template_name}]",
+            status="sent" if result.get("success") or result.get("mock") else "failed",
+            is_read=True,
+        )
+        db.add(re_msg)
+        lead.last_message_at = datetime.datetime.utcnow()
+        db.commit()
+        return {"status": "ok", "message": "Re-engagement template sent"}
+    else:
+        # Send full welcome sequence in background
+        import threading
+        from welcome_sequence import send_welcome_sequence
+
+        def _run(phone_num, lid):
+            try:
+                result = send_welcome_sequence(phone_num)
+                print(f"Force welcome sent to {phone_num}: {result}")
+                wdb = SessionLocal()
+                try:
+                    wlead = wdb.query(Lead).filter(Lead.id == lid).first()
+                    if wlead:
+                        wlead.welcome_sent = True
+                        from welcome_sequence import get_welcome_db_messages
+                        for m in get_welcome_db_messages():
+                            wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                            content=m["content"], status="sent", is_read=True))
+                    wdb.commit()
+                finally:
+                    wdb.close()
+            except Exception as e:
+                print(f"Force welcome error: {e}")
+
+        thread = threading.Thread(target=_run, args=(phone, lead.id))
+        thread.daemon = True
+        thread.start()
+        return {"status": "ok", "message": "Welcome sequence started"}
 
 
 # ─── Knowledge Base API ──────────────────────────────────────────────
@@ -1060,6 +1161,98 @@ def search_knowledge_base(req: KBSearchRequest):
     results = search_kb(req.query, req.n_results)
     return {"query": req.query, "results": results}
 
+# ─── WhatsApp Webhook API ──────────────────────────────────────────────
+
+@app.get("/webhook")
+def verify_whatsapp_webhook(
+    request: Request,
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token")
+):
+    """Verify WhatsApp webhook subscription."""
+    challenge = verify_webhook(hub_mode, hub_verify_token, hub_challenge)
+    if challenge:
+        return int(challenge)
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/webhook")
+async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
+    """Receive incoming messages from WhatsApp."""
+    payload = await request.json()
+    parsed = parse_webhook_message(payload)
+    
+    if parsed and parsed.get("message_text"):
+        # Create or find lead
+        phone = parsed["from_phone"]
+        phone_clean = phone[-10:] if len(phone) > 10 else phone
+        lead = db.query(Lead).filter(
+            (Lead.phone == phone) | (Lead.phone == phone_clean) | (Lead.phone.endswith(phone_clean))
+        ).first()
+
+        is_new_lead = False
+        if not lead:
+            is_new_lead = True
+            lead = Lead(
+                name=parsed.get("sender_name") or phone,
+                phone=phone_clean,
+                source="whatsapp",
+                status="new",
+                auto_reply_enabled=True,
+                welcome_sent=False,
+            )
+            db.add(lead)
+            db.commit()
+            db.refresh(lead)
+
+        # Create incoming message
+        incoming = Message(
+            lead_id=lead.id,
+            direction="in",
+            channel="whatsapp",
+            content=parsed["message_text"],
+            status="received",
+            wa_message_id=parsed["message_id"],
+            is_read=False,
+            is_auto_replied=False,
+        )
+        db.add(incoming)
+        lead.last_message_at = datetime.datetime.utcnow()
+        lead.unread_count = (lead.unread_count or 0) + 1
+        db.commit()
+
+        # Send welcome sequence if this is the first reply (template reply)
+        if not lead.welcome_sent:
+            import threading
+            from welcome_sequence import send_welcome_sequence
+
+            def _run_welcome(phone_num, lead_id):
+                try:
+                    result = send_welcome_sequence(phone_num)
+                    print(f"Welcome sequence sent to {phone_num}: {result}")
+                    wdb = SessionLocal()
+                    try:
+                        wlead = wdb.query(Lead).filter(Lead.id == lead_id).first()
+                        if wlead:
+                            wlead.welcome_sent = True
+                            from welcome_sequence import get_welcome_db_messages
+                            for m in get_welcome_db_messages():
+                                wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
+                                                content=m["content"], status="sent", is_read=True))
+                        wdb.commit()
+                    finally:
+                        wdb.close()
+                except Exception as e:
+                    print(f"Welcome sequence error: {e}")
+
+            incoming.is_auto_replied = True
+            db.commit()
+            thread = threading.Thread(target=_run_welcome, args=(phone_clean, lead.id))
+            thread.daemon = True
+            thread.start()
+
+    return {"status": "ok"}
 
 # ─── Run Server ───────────────────────────────────────────────────────
 

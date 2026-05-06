@@ -67,10 +67,10 @@ def stop_scheduler():
 def process_unread_messages():
     """
     Process unread incoming messages:
-    1. Find all unread, un-replied incoming messages
-    2. For each, generate AI reply using RAG (knowledge base + properties)
-    3. Send reply via WhatsApp
-    4. Store in DB
+    1. Trigger welcome sequence for first-time leads
+    2. Detect location questions and send directions
+    3. Generate AI reply using RAG (knowledge base + properties)
+    4. Send reply via WhatsApp
     """
     db = SessionLocal()
     try:
@@ -82,7 +82,7 @@ def process_unread_messages():
                 Message.is_auto_replied == False,
             )
             .order_by(Message.created_at.asc())
-            .limit(5)  # Process max 5 at a time
+            .limit(5)
             .all()
         )
 
@@ -97,34 +97,100 @@ def process_unread_messages():
                 msg.is_auto_replied = True
                 continue
 
+            # Skip auto-reply for leads parsed from email (only reply to manual/whatsapp leads)
+            if lead.source not in ["manual", "whatsapp"]:
+                msg.is_auto_replied = True
+                continue
+
             if not lead.phone:
                 msg.is_auto_replied = True
                 continue
 
+            # ── WELCOME SEQUENCE for first-time leads ──
+            if not lead.welcome_sent:
+                import threading
+                from welcome_sequence import send_welcome_sequence, get_welcome_db_messages
+
+                def _run_welcome(phone_num, lead_id):
+                    try:
+                        result = send_welcome_sequence(phone_num)
+                        print(f"[Followup] Welcome sent to {phone_num}: {result}")
+                        wdb = SessionLocal()
+                        try:
+                            wlead = wdb.query(Lead).filter(Lead.id == lead_id).first()
+                            if wlead:
+                                wlead.welcome_sent = True
+                                for m in get_welcome_db_messages():
+                                    wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
+                                                    content=m["content"], status="sent", is_read=True))
+                            wdb.commit()
+                        finally:
+                            wdb.close()
+                    except Exception as e:
+                        print(f"[Followup] Welcome error: {e}")
+
+                thread = threading.Thread(target=_run_welcome, args=(lead.phone, lead.id))
+                thread.daemon = True
+                thread.start()
+                msg.is_auto_replied = True
+                db.commit()
+                continue  # Don't send AI reply for the first message — welcome handles it
+
+            # ── Detect intent keywords ──
+            msg_lower = msg.content.lower()
+
+            # Location keywords
+            wants_location = any(kw in msg_lower for kw in [
+                'location', 'address', 'kaha', 'kahan', 'where', 'kidhar',
+                'pune me kaha', 'location kya', 'jagah', 'route', 'direction',
+                'kaise aaye', 'kaise aana', 'how to reach', 'come',
+            ])
+
+            # Media keywords
+            wants_media = any(kw in msg_lower for kw in [
+                'photo', 'photos', 'video', 'videos', 'image', 'images',
+                'pic', 'pics', 'picture', 'pictures', 'dekho', 'dikhao',
+                'send me', 'bhejo', 'share', 'flat ka video', 'amenity',
+                'send photos', 'send videos', 'visuals', 'dekhna',
+            ])
+
             # Build lead context
-            lead_context = f"Budget: {lead.budget_min or '?'}-{lead.budget_max or '?'}L, Location: {lead.preferred_location or '?'}, Type: {lead.property_type or '?'}"
+            context_parts = []
+            if lead.budget_min or lead.budget_max:
+                context_parts.append(f"Budget: {lead.budget_min or ''} to {lead.budget_max or ''}L")
+            if lead.preferred_location:
+                context_parts.append(f"Location: {lead.preferred_location}")
+            if lead.property_type:
+                context_parts.append(f"Type: {lead.property_type}")
+            lead_context = ", ".join(context_parts)
 
-            # Search knowledge base for relevant info
-            kb_results = []
-            try:
-                kb_results = search_kb(msg.content, n_results=3)
-            except Exception as e:
-                print(f"KB search error: {e}")
+            # Fetch recent conversation history for this lead
+            recent_messages = (
+                db.query(Message)
+                .filter(Message.lead_id == lead.id)
+                .order_by(Message.created_at.desc())
+                .limit(20)
+                .all()
+            )
+            conversation_history = [
+                {"direction": m.direction, "content": m.content}
+                for m in reversed(recent_messages)
+                if m.content and not m.content.startswith("[IMAGE:") and not m.content.startswith("[VIDEO:")
+            ]
 
-            # Search properties for relevant matches
-            property_results = []
-            try:
-                property_results = search_properties(msg.content, n_results=2)
-            except Exception as e:
-                print(f"Property search error: {e}")
+            # ── LOCATION SEQUENCE ──
+            if wants_location:
+                _send_location_sequence(lead, db)
+                msg.is_auto_replied = True
+                db.commit()
+                continue
 
-            # Generate AI reply with RAG context
+            # ── Generate AI reply ──
             reply_text = generate_rag_reply(
                 incoming_message=msg.content,
                 lead_name=lead.name,
                 lead_context=lead_context,
-                kb_results=kb_results,
-                property_results=property_results,
+                conversation_history=conversation_history,
             )
 
             if reply_text and not reply_text.startswith("["):
@@ -133,16 +199,17 @@ def process_unread_messages():
 
                 # Store outgoing message
                 outgoing = Message(
-                    lead_id=lead.id,
-                    direction="out",
-                    channel="whatsapp",
+                    lead_id=lead.id, direction="out", channel="whatsapp",
                     content=reply_text,
                     status="sent" if result.get("success") or result.get("mock") else "failed",
                     wa_message_id=result.get("message_id", ""),
                     is_read=True,
-                    is_auto_replied=False,
                 )
                 db.add(outgoing)
+
+                # If user asked for media, send photos and videos
+                if wants_media:
+                    _send_media_on_request(lead, db)
 
                 # Update lead
                 lead.last_message_at = datetime.datetime.utcnow()
@@ -157,9 +224,124 @@ def process_unread_messages():
         db.commit()
     except Exception as e:
         print(f"Unread processing error: {e}")
+        import traceback
+        traceback.print_exc()
         db.rollback()
     finally:
         db.close()
+
+
+# ── Location Sequence ──────────────────────────────
+LOCATION_MESSAGES = [
+    (
+        "Location 📍 :- Shapoorji Pallonji Vanaha, Bavdhan, Pune.\n"
+        "It is on the road of Oxford Golf Course.\n"
+        "It is *12 Min* from Chellaram Hospital / Bavdhan Highway. (as per Google Maps)"
+    ),
+    (
+        "*Step 1)  Come to Khandoba Mandir first..* 👇👇\n"
+        "https://maps.app.goo.gl/voJFQMmiKCML87t66"
+    ),
+    (
+        "Step 2)  Follow Below Google Map Route to \"Yahavi\" society. 👇\n"
+        "( Do *Not* change any option in the route. Keep *CAR* option selected for accurate route.\n"
+        "Because, Location is *only 12 Min* from Chellaram Hospital on Highway, but sometimes "
+        "Google Maps show *wrong Route*. )\n"
+        "⏬🔽👇👇👇👇🔽⏬\n"
+        "Shared route: https://maps.app.goo.gl/34qg3NuAyQH2uj5b8?g_st=awb"
+    ),
+    (
+        "Sending *Gate-Pass* Below so that Security will allow you in...\n"
+        "( No Fees Charged 😊)\n"
+        "👇👇👇👇👇"
+    ),
+    (
+        "🚗 Please park your Vehicles *outside* the society main gate to avoid fines and Jammers.\n"
+        "🪪 Show above gatepass to security if they ask.\n\n"
+        " And come to Tower 1 , Oak , A wing, Flat No 1802.. on the 18th floor.\n"
+        "Agent contact 📞  - 7387457889"
+    ),
+]
+
+
+def _send_location_sequence(lead, db):
+    """Send location + directions sequence when user asks for location."""
+    import time as _time
+    for loc_msg in LOCATION_MESSAGES:
+        result = send_whatsapp_message(lead.phone, loc_msg)
+        db.add(Message(
+            lead_id=lead.id, direction="out", channel="whatsapp",
+            content=loc_msg,
+            status="sent" if result.get("success") or result.get("mock") else "failed",
+            is_read=True,
+        ))
+        _time.sleep(1)
+
+    # Send location map images if they exist
+    from welcome_sequence import _get_media_files
+    location_images = _get_media_files("locations", ("jpg", "jpeg", "png", "webp"))
+    if location_images:
+        from whatsapp import upload_whatsapp_media as _upload
+        for img_path in location_images:
+            try:
+                fname = os.path.basename(img_path)
+                with open(img_path, "rb") as f:
+                    file_bytes = f.read()
+                ext = fname.rsplit(".", 1)[-1].lower()
+                mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                media_id = _upload(file_bytes, mime, fname)
+                if media_id:
+                    send_whatsapp_message(lead.phone, media_id=media_id, media_type="image")
+                db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
+                               content=f"[IMAGE:{fname}]", status="sent", is_read=True))
+                _time.sleep(1)
+            except Exception as e:
+                print(f"Location image error: {e}")
+
+    db.commit()
+    print(f"Location sequence sent to {lead.name}")
+
+
+def _send_media_on_request(lead, db):
+    """Send photos and videos when user explicitly asks."""
+    import time as _time
+    from welcome_sequence import get_amenity_photos, get_flat_videos
+    from whatsapp import upload_whatsapp_media as _upload
+    try:
+        photos = get_amenity_photos()[:6]
+        for photo_path in photos:
+            try:
+                fname = os.path.basename(photo_path)
+                with open(photo_path, "rb") as f:
+                    file_bytes = f.read()
+                ext = fname.rsplit(".", 1)[-1].lower()
+                mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                media_id = _upload(file_bytes, mime, fname)
+                if media_id:
+                    send_whatsapp_message(lead.phone, media_id=media_id, media_type="image")
+                db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
+                               content=f"[IMAGE:{fname}]", status="sent", is_read=True))
+                _time.sleep(1)
+            except Exception as pe:
+                print(f"Photo send error: {pe}")
+
+        videos = get_flat_videos()[:3]
+        for video_path in videos:
+            try:
+                fname = os.path.basename(video_path)
+                with open(video_path, "rb") as f:
+                    file_bytes = f.read()
+                media_id = _upload(file_bytes, "video/mp4", fname)
+                if media_id:
+                    send_whatsapp_message(lead.phone, media_id=media_id, media_type="video")
+                db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
+                               content=f"[VIDEO:{fname}]", status="sent", is_read=True))
+                _time.sleep(2)
+            except Exception as ve:
+                print(f"Video send error: {ve}")
+        print(f"Media sent to {lead.name}: {len(photos)} photos, {len(videos)} videos")
+    except Exception as me:
+        print(f"Media sending error: {me}")
 
 
 def process_followups():
