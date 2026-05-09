@@ -287,6 +287,10 @@ def search_kb(query: str, n_results: int = 3) -> list:
     kb_results = []
     if results and results["documents"] and results["documents"][0]:
         for i, doc in enumerate(results["documents"][0]):
+            try:
+                print(f"[RAG] Found chunk (relevance: {1 - results['distances'][0][i]:.2f})")
+            except Exception:
+                pass
             kb_results.append({
                 "text": doc,
                 "source": results["metadatas"][0][i].get("source", "") if results["metadatas"][0] else "",

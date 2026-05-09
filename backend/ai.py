@@ -28,25 +28,19 @@ def _truncate_reply(text: str, max_sentences: int = 2) -> str:
 
 
 def _scrub_brokerage(text: str) -> str:
-    """Remove any mention of brokerage/commission/GST from AI output.
-    The AI should NEVER proactively mention these — only when explicitly asked."""
+    """Post-process AI output for brokerage mentions.
+    
+    Brokerage info is now correctly provided in the prompt:
+    - Rental: 1 month rent brokerage
+    - Buying: Zero brokerage
+    So we no longer strip these mentions — they are valid answers.
+    Only strip GST mentions (never relevant).
+    """
     import re
     if not text:
         return text
-    # Remove sentences/clauses that mention brokerage, commission, or GST
-    # Pattern: match "with no brokerage...", "no brokerage...", "without brokerage..."
-    patterns = [
-        r'\s*[,.]?\s*with\s+no\s+brokerage[^.!?]*[.!?]?',
-        r'\s*[,.]?\s*no\s+brokerage[^.!?]*[.!?]?',
-        r'\s*[,.]?\s*without\s+(any\s+)?brokerage[^.!?]*[.!?]?',
-        r'\s*[,.]?\s*zero\s+brokerage[^.!?]*[.!?]?',
-        r'\s*[,.]?\s*brokerage[\s-]?free[^.!?]*[.!?]?',
-    ]
-    for p in patterns:
-        text = re.sub(p, '', text, flags=re.IGNORECASE)
-    # Also remove any standalone mention of "brokerage" or "GST" in a clause
-    # e.g. "...with no brokerage or GST fees involved"
-    text = re.sub(r'\s*,?\s*(?:with\s+)?no\s+(?:brokerage|commission|GST)[^.!?]*', '', text, flags=re.IGNORECASE)
+    # Only strip GST mentions — brokerage is now legitimate info
+    text = re.sub(r'\s*[,.]?\s*(?:plus|with|and)?\s*(?:no\s+)?GST[^.!?]*[.!?]?', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip()
     if text and text[-1] not in '.!?':
         text += '.'
@@ -168,6 +162,32 @@ def _load_full_knowledge_base() -> str:
     return kb_text.strip()
 
 
+def _strip_price_chunks(kb_text: str) -> str:
+    """Remove Rent Structure and Buying Prices chunks from KB text.
+    
+    These are already provided as an explicit price table in the prompt.
+    Having them duplicated in the FACTS section causes phi3:mini to
+    mix up rent (thousands) and buy (lakhs) prices.
+    """
+    import re
+    # Remove the Rent Structure chunk (VAN-005)
+    kb_text = re.sub(
+        r'CHUNK_ID:\s*VAN-005.*?={10,}',
+        '',
+        kb_text,
+        flags=re.DOTALL
+    )
+    # Remove the Buying Prices chunk (VAN-006)
+    kb_text = re.sub(
+        r'CHUNK_ID:\s*VAN-006.*?={10,}',
+        '',
+        kb_text,
+        flags=re.DOTALL
+    )
+    # Clean up multiple blank lines
+    kb_text = re.sub(r'\n{3,}', '\n\n', kb_text)
+    return kb_text.strip()
+
 def generate_rag_reply(
     incoming_message: str,
     lead_name: str,
@@ -177,54 +197,86 @@ def generate_rag_reply(
     conversation_history: list = None,
 ) -> str:
     """
-    Generate an AI reply using the FULL knowledge base injected into the prompt.
-    Supports Hinglish/Marathi detection and uses last 10 messages for context.
+    Generate an AI reply using RAG context.
     """
-    # Load the FULL knowledge base (small file, ~7KB — fits easily)
-    full_kb = _load_full_knowledge_base()
+    # 1. Process KB results into a clean context string
+    context_text = ""
+    if kb_results:
+        chunks = []
+        for res in kb_results:
+            # Skip price chunks if they somehow got in (we want prices ONLY from our table)
+            if "VAN-005" in res['text'] or "VAN-006" in res['text']:
+                continue
+            chunks.append(res['text'])
+        context_text = "\n\n".join(chunks)
 
-    # Build recent conversation history — skip welcome sequence messages to keep context clean
+    # 2. Build recent conversation history
     history_text = ""
     if conversation_history:
-        # Filter out welcome sequence / media messages to keep context focused
         filtered = []
         for m in conversation_history:
             content = m.get("content", "")
-            # Skip welcome sequence texts, media refs, and very long messages (bulk texts)
-            if not content:
+            if not content or content.startswith("[IMAGE:") or content.startswith("[VIDEO:"):
                 continue
-            if content.startswith("[IMAGE:") or content.startswith("[VIDEO:"):
+            if len(content) > 300:  # Skip very long welcome messages
                 continue
-            if len(content) > 200:  # Welcome texts are long — skip them
-                continue
-            if any(skip in content for skip in ["Please wait and don't reply", "Please find below the photos", "Please find below the Videos", "Rent Structure", "Buying Prices"]):
+            if any(skip in content for skip in ["wait and don't reply", "find below the photos", "find below the Videos"]):
                 continue
             filtered.append(m)
-        recent = filtered[-10:]  # Last 10 clean messages only
+        
+        recent = filtered[-10:]
         lines = []
         for m in recent:
-            role = "Customer" if m.get("direction") == "in" else "You"
-            lines.append(f"{role}: {m.get('content', '')[:150]}")
+            role = "Customer" if m.get("direction") == "in" else "Agent"
+            content = m.get('content', '')
+            # Skip old agent replies that contain wrong price/brokerage info 
+            # (from previous hallucinations) to prevent the model from repeating them
+            if role == "Agent" and any(bad in content.lower() for bad in [
+                'rs.10l', 'rs.25l', '26l', 'equivalent to one month', 'matey',
+                'ranges from rs. 16k to', 'rs.16k to rs'
+            ]):
+                continue
+            lines.append(f"{role}: {content}")
         history_text = "\n".join(lines)
 
-    prompt = f"""You are a WhatsApp real estate assistant at Vanaha Township, Bavdhan, Pune.
+    # 3. Create a bullet-proof prompt
+    prompt = f"""You are an expert real estate agent at Armstrong Properties, Vanaha Township, Bavdhan, Pune.
+Task: Answer the Customer's query accurately using ONLY the data below.
 
-PRICES:
-RENT: 1BHK=16k-18k, 2BHK=21k-22k, 3BHK Compact=23k-25k, 3BHK Grande=26k-28k
-BUY: 1BHK=51L, 2BHK=81L, 3BHK Compact=90L, 3BHK Grande=1Cr
-Deposit=2 months rent. Location=12 min from Chellaram Hospital, Bavdhan Highway.
+=== PRICE TABLE (THESE ARE THE ONLY CORRECT PRICES) ===
+FOR RENT (Monthly):
+  1 BHK rent = 16,000 to 18,000 per month
+  2 BHK rent = 21,000 to 22,000 per month
+  3 BHK Compact rent = 23,000 to 25,000 per month
+  3 BHK Grande rent = 26,000 to 28,000 per month
+  Deposit = 2 months rent
+  Brokerage for RENT = 1 month rent (example: if rent is 16k then brokerage is 16k)
 
-FACTS:
-{full_kb[:3500]}
+FOR BUYING (Purchase Price):
+  1 BHK buy = 51 Lakhs (negotiable)
+  2 BHK buy = 81 Lakhs (negotiable)
+  3 BHK Compact buy = 90 Lakhs (negotiable)
+  3 BHK Grande buy = 1 Crore (negotiable)
+  Brokerage for BUYING = ZERO. No brokerage for buying.
+=== END PRICE TABLE ===
 
-INSTRUCTIONS: Reply in 1-2 SHORT sentences. If customer asks about RENT give rent price. If customer asks about BUYING/PURCHASE give buy price. End with a question. No introductions. Use Hinglish naturally.
+RULES:
+1. Keep reply to 1-2 sentences. End with a question.
+2. Brokerage is NOT rent. Brokerage is our service fee. For rent it equals 1 month rent. For buy it is zero.
+3. Never combine rent and buy prices in one answer.
 
-{f'Recent chat:' if history_text else ''}
+CONTEXT:
+{context_text[:1500] if context_text else "Vanaha Township, Bavdhan, Pune. 12 min from Chellaram Hospital."}
+
+{f'CONVERSATION:' if history_text else ''}
 {history_text}
 
-Customer: {incoming_message[:200]}
-Reply:"""
-    reply = generate(prompt, max_tokens=80, temperature=0.3)
+Customer: {incoming_message}
+Agent:"""
+    
+    # Use higher temperature for Gemma2 9B to sound more natural, but keep top_p high for facts
+    reply = generate(prompt, max_tokens=100, temperature=0.3)
+    print(f"[AI] Generating reply using {DEFAULT_MODEL} for {lead_name}...")
     return _truncate_reply(reply)
 
 

@@ -263,10 +263,15 @@ def process_unread_messages():
                         f"- {m.content}" for m in msgs if m.content
                     ) + "\n\nRespond to ALL of the above messages in one reply. Address every point — whether it is a question, request, or statement."
 
+                # 1. Search KB for relevant context (actual RAG)
+                kb_context = search_kb(ai_input, n_results=4)
+                
+                # 2. Generate reply
                 reply_text = generate_rag_reply(
                     incoming_message=ai_input,
                     lead_name=lead.name,
                     lead_context=lead_context,
+                    kb_results=kb_context,
                     conversation_history=conversation_history,
                 )
 
@@ -293,7 +298,7 @@ def process_unread_messages():
                     if lead.status == "new":
                         lead.status = "contacted"
 
-                    print(f"Auto-replied to {lead.name} ({len(msgs)} msgs): {reply_text[:60]}...")
+                    print(f"Auto-replied to {lead.name} ({len(msgs)} msgs): {reply_text[:60].encode('ascii','replace').decode()}...")
 
                 # Mark ALL incoming messages as auto-replied and release locks
                 for m in msgs:
@@ -303,7 +308,7 @@ def process_unread_messages():
 
             except Exception as msg_err:
                 # Per-lead error handling — release locks so messages can be retried
-                print(f"Error processing lead {lead_id} messages: {msg_err}")
+                print(f"Error processing lead {lead_id} messages: {str(msg_err).encode('ascii','replace').decode()}")
                 import traceback
                 traceback.print_exc()
                 try:
