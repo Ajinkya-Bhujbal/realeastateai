@@ -118,8 +118,14 @@ def upload_whatsapp_media(file_bytes: bytes, mime_type: str, filename: str) -> O
     return None
 
 
-def send_whatsapp_template(to_phone: str, template_name: str, language: str = "en") -> dict:
-    """Send a WhatsApp template message (for first-time contacts)."""
+def send_whatsapp_template(to_phone: str, template_name: str, language: str = "en",
+                           header_image_id: str = None, body_params: list = None) -> dict:
+    """
+    Send a WhatsApp template message (for first-time contacts / re-engagement).
+    Supports:
+      - header_image_id: WhatsApp media ID for the image header component
+      - body_params: list of text parameters for the body component (e.g. ["Customer Name"])
+    """
     if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
         return {"success": False, "error": "WhatsApp not configured", "mock": True}
 
@@ -132,20 +138,42 @@ def send_whatsapp_template(to_phone: str, template_name: str, language: str = "e
         "Authorization": f"Bearer {WA_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
+
+    template_obj = {
+        "name": template_name,
+        "language": {"code": language},
+    }
+
+    # Build components (header image + body params)
+    components = []
+    if header_image_id:
+        components.append({
+            "type": "header",
+            "parameters": [{"type": "image", "image": {"id": header_image_id}}]
+        })
+    if body_params:
+        components.append({
+            "type": "body",
+            "parameters": [{"type": "text", "text": p} for p in body_params]
+        })
+    if components:
+        template_obj["components"] = components
+
     payload = {
         "messaging_product": "whatsapp",
         "to": phone,
         "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": language},
-        },
+        "template": template_obj,
     }
 
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         data = r.json()
-        return {"success": r.status_code == 200, "data": data}
+        if r.status_code == 200:
+            return {"success": True, "data": data}
+        else:
+            print(f"[WA Template Error] {data}")
+            return {"success": False, "error": data, "status_code": r.status_code}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

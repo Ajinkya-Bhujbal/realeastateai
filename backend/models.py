@@ -29,6 +29,7 @@ class Lead(Base):
     unread_count = Column(Integer, default=0)
     auto_reply_enabled = Column(Boolean, default=True)
     welcome_sent = Column(Boolean, default=False)  # Has welcome sequence been sent?
+    media_sent = Column(Boolean, default=False)  # Has the media sequence (photos/videos) been sent?
     created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
@@ -85,3 +86,28 @@ class FollowUpSchedule(Base):
     created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     lead = relationship("Lead", back_populates="followups")
+
+
+class RawEmail(Base):
+    """
+    Staging table for raw emails fetched from Gmail.
+    Every email is stored here BEFORE parsing — guarantees zero data loss.
+    Enables: crash recovery, re-parsing after bug fixes, audit trail.
+    """
+    __tablename__ = "raw_emails"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    gmail_message_id = Column(String(500), unique=True, nullable=False)  # RFC Message-ID header
+    subject = Column(String(500), nullable=True)
+    sender = Column(String(300), nullable=True)
+    body = Column(Text, nullable=True)         # plain text body
+    html_body = Column(Text, nullable=True)    # HTML body
+    # Processing status: pending → parsed | quarantined | error
+    status = Column(String(30), default="pending")
+    quarantine_reason = Column(String(300), nullable=True)  # why it was quarantined
+    parse_result_json = Column(Text, nullable=True)  # JSON snapshot of parsed data
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)  # linked lead once parsed
+    received_at = Column(DateTime, nullable=True)    # original email date
+    fetched_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    parsed_at = Column(DateTime, nullable=True)
+

@@ -85,6 +85,7 @@ graph TB
                     ┌──────────────▼───────────────┐
                     │   status = "new"              │
                     │   welcome_sent = false         │
+                    │   media_sent = false           │
                     │   auto_reply_enabled = true    │
                     └──────────────┬───────────────┘
                                    │
@@ -138,7 +139,7 @@ graph TB
      │  1. auto_reply_enabled?    │──NO──► Skip
      │  2. source in [manual,wa]? │──NO──► Skip (email leads = no auto-reply)
      │  3. has phone?             │──NO──► Skip
-     │  4. welcome_sent?          │──NO──► Send welcome sequence ► STOP
+     │  4. media_sent?            │──NO──► Send welcome sequence ► STOP
      │  5. location keywords?     │──YES──► _send_location_sequence() ► STOP
      │  6. Generate RAG reply     │────────► Send reply
      │  7. media keywords?        │──YES──► Also _send_media_on_request()
@@ -215,7 +216,7 @@ def _get_media_files(subfolder: str, extensions: tuple) -> list:
 ### `backend/ai.py` (7KB)
 Ollama LLM integration:
 - `check_ollama()` / `list_models()` — health check
-- `generate_rag_reply()` — main function: searches KB via ChromaDB, builds system prompt with context + conversation history, calls Ollama
+- `generate_rag_reply()` — main function: searches KB via ChromaDB, builds system prompt with context + conversation history, calls Ollama. Note: phi3:mini uses a simplified system prompt to maintain speed and coherence.
 - `generate_auto_reply()` — simpler, without RAG context
 - `generate_followup_message()` — generates follow-up message text
 
@@ -360,10 +361,10 @@ User Query: "What amenities are available?"
     │
     ▼
 3. Ollama API call: POST http://localhost:11434/api/generate
-   └── model: gemma2:9b, prompt: system + user message
+   └── model: phi3:mini, prompt: system + user message + prices + limited history
     │
     ▼
-4. Response → cleaned → sent via WhatsApp
+4. Response → truncated and cleaned → sent via WhatsApp
 ```
 
 ### Knowledge Base

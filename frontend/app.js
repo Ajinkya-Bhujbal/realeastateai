@@ -89,8 +89,9 @@ function timeAgo(iso) {
     if (s < 60) return s + 's ago';
     if (s < 3600) return Math.floor(s / 60) + 'm ago';
     if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-    if (s < 604800) return Math.floor(s / 86400) + 'd ago';
-    return d.toLocaleDateString();
+    if (s < 2592000) return Math.floor(s / 86400) + 'd ago';  // up to 30 days
+    if (s < 31536000) return Math.floor(s / 2592000) + 'mo ago';  // up to 12 months
+    return Math.floor(s / 31536000) + 'y ago';
 }
 
 function formatTime(iso) {
@@ -119,6 +120,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (view === 'messages') { loadChats(); startChatPolling(); }
         if (view === 'properties') {}
         if (view === 'ai') { checkAI(); loadKBStatus(); }
+        if (view === 'quarantine') loadQuarantine();
         // Stop polling when leaving messages
         if (view !== 'messages') stopChatPolling();
     });
@@ -162,6 +164,66 @@ async function loadDashboard() {
     }
 }
 
+// ─── WhatsApp Live Mode Toggle ──────────
+async function loadWaGuard() {
+    const d = await api('/api/wa/live-mode', { silent: true });
+    if (!d) return;
+    updateWaGuardUI(d.live_mode, d.whitelist);
+}
+
+function updateWaGuardUI(liveMode, whitelist) {
+    const card = $('wa-guard-card');
+    const toggle = $('wa-live-toggle');
+    const desc = $('wa-guard-desc');
+    const wlDiv = $('wa-guard-whitelist');
+
+    toggle.checked = liveMode;
+    if (liveMode) {
+        card.classList.add('live');
+        desc.innerHTML = '🟢 <strong>LIVE</strong> — Messages will be sent to <strong>ALL</strong> leads';
+        desc.style.color = '#4ade80';
+    } else {
+        card.classList.remove('live');
+        desc.innerHTML = '🔒 <strong>TEST MODE</strong> — Messages only sent to whitelisted numbers';
+        desc.style.color = '#f87171';
+    }
+
+    if (whitelist && whitelist.length > 0) {
+        wlDiv.innerHTML = '✅ Always-allowed numbers: ' +
+            whitelist.map(p => `<span class="wl-phone">${p}</span>`).join('');
+    } else {
+        wlDiv.innerHTML = '⚠️ No whitelisted numbers. Add WA_WHITELIST_PHONES in .env file.';
+    }
+}
+
+window.toggleLiveMode = async function(enabled) {
+    if (enabled) {
+        const confirmed = confirm(
+            '⚠️ WARNING: Turning Live Mode ON will send WhatsApp messages to ALL leads!\n\n' +
+            'Are you sure you want to enable this? Only do this when you are ready for production.'
+        );
+        if (!confirmed) {
+            $('wa-live-toggle').checked = false;
+            return;
+        }
+    }
+    const d = await api('/api/wa/live-mode', {
+        method: 'POST',
+        body: { enabled: enabled }
+    });
+    if (d) {
+        updateWaGuardUI(d.live_mode, d.whitelist);
+        toast(d.message, enabled ? 'warning' : 'success');
+    }
+};
+
+// Load WA guard status on dashboard load
+const _origLoadDashboard = loadDashboard;
+loadDashboard = async function() {
+    await _origLoadDashboard();
+    await loadWaGuard();
+};
+
 // ─── Leads ──────────────────────
 async function loadLeads() {
     const status = $('filter-status').value;
@@ -176,15 +238,28 @@ async function loadLeads() {
     if (!d) return;
     const tb = $('leads-tbody');
     if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="10" class="empty-state">No leads found</td></tr>'; return; }
-    tb.innerHTML = d.leads.map(l => `
+    tb.innerHTML = d.leads.map(l => {
+        // Determine the "arrived" time — use updated_at (reflects latest email arrival) or created_at
+        const arrivedAt = l.updated_at || l.created_at;
+        // Build tag display — show DEALER/BROKER/OWNER as special badges
+        const tagUpper = (l.tag || 'NEW').toUpperCase();
+        const isSpecialTag = ['DEALER', 'BROKER', 'OWNER'].includes(tagUpper);
+        const tagBadge = isSpecialTag
+            ? `<span class="badge badge-role badge-${tagUpper.toLowerCase()}">${tagUpper}</span>`
+            : '';
+        // Email count badge (clickable to show details)
+        const emailBadge = l.email_count > 1
+            ? `<span class="email-count-badge" title="Click to see all ${l.email_count} emails" onclick="event.stopPropagation(); showEmailDetails(${l.id}, this)" style="cursor:pointer">📧${l.email_count}</span>`
+            : (l.email_count === 1 ? `<span class="email-count-badge" title="Click to see email details" onclick="event.stopPropagation(); showEmailDetails(${l.id}, this)" style="cursor:pointer">📧1</span>` : '');
+        return `
         <tr>
-            <td><strong>${esc(l.name)}</strong>${l.email ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(l.email) + '</span>' : ''}</td>
+            <td><strong>${esc(l.name)}</strong>${tagBadge}${emailBadge}${l.email ? '<br><span style="font-size:11px;color:var(--text-muted)">' + esc(l.email) + '</span>' : ''}</td>
             <td>${esc(l.phone || '-')}</td>
             <td><span class="source-badge">${l.source}</span></td>
             <td>${esc(l.configuration || l.property_type || '-')}</td>
             <td>${esc(l.price || (l.budget_min || l.budget_max ? (l.budget_min || '?') + '-' + (l.budget_max || '?') + 'L' : '-'))}</td>
             <td>${esc(l.preferred_location || '-')}</td>
-            <td class="time-ago-cell" data-created="${l.created_at || ''}" style="font-size:12px;color:var(--text-secondary)">${timeAgo(l.created_at)}</td>
+            <td class="time-ago-cell" data-created="${arrivedAt || ''}" style="font-size:12px;color:var(--text-secondary)">${timeAgo(arrivedAt)}</td>
             <td style="text-align:center">
                 <input type="checkbox" class="welcome-cb" ${l.welcome_sent ? 'checked' : ''}
                     onclick="toggleWelcome(${l.id}, ${l.welcome_sent ? 'true' : 'false'}, '${esc(l.phone || '')}')"
@@ -194,18 +269,23 @@ async function loadLeads() {
             <td>
                 <select class="input tag-select" onchange="updateTag(${l.id}, this)">
                     <option value="NEW" ${l.tag === 'NEW' ? 'selected' : ''}>NEW</option>
+                    <option value="DEALER" ${l.tag === 'DEALER' ? 'selected' : ''}>DEALER</option>
+                    <option value="BROKER" ${l.tag === 'BROKER' ? 'selected' : ''}>BROKER</option>
+                    <option value="OWNER" ${l.tag === 'OWNER' ? 'selected' : ''}>OWNER</option>
                     <option value="visited" ${l.tag === 'visited' ? 'selected' : ''}>Visited</option>
                     <option value="interested" ${l.tag === 'interested' ? 'selected' : ''}>Interested</option>
                     <option value="not interested" ${l.tag === 'not interested' ? 'selected' : ''}>Not Interested</option>
-                    ${!['NEW', 'visited', 'interested', 'not interested'].includes(l.tag || 'NEW') ? `<option value="${esc(l.tag)}" selected>${esc(l.tag)}</option>` : ''}
+                    ${!['NEW', 'DEALER', 'BROKER', 'OWNER', 'visited', 'interested', 'not interested'].includes(l.tag || 'NEW') ? `<option value="${esc(l.tag)}" selected>${esc(l.tag)}</option>` : ''}
                     <option value="_custom">+ Custom Tag...</option>
                 </select>
             </td>
             <td class="action-btns">
                 <button class="action-btn" onclick="viewLead(${l.id})">View</button>
+                ${l.welcome_sent ? `<button class="action-btn reengage" onclick="reEngageLead(${l.id}, '${esc(l.name)}')" title="Send template message to re-open conversation">📩</button>` : ''}
                 <button class="action-btn delete" onclick="deleteLead(${l.id})">Del</button>
             </td>
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
 }
 
 $('filter-status').addEventListener('change', loadLeads);
@@ -219,11 +299,84 @@ window.viewLead = async function (id) {
     alert(`Lead: ${d.name}\nPhone: ${d.phone}\nEmail: ${d.email}\nStatus: ${d.status}\nBudget: ${d.budget_min}-${d.budget_max}L\nLocation: ${d.preferred_location}\nType: ${d.property_type}\nMessages: ${(d.messages || []).length}`);
 };
 
+// Show all email inquiries for a lead in a floating dropdown
+window.showEmailDetails = async function (leadId, badgeEl) {
+    // Close any existing dropdown
+    const existing = document.querySelector('.email-details-dropdown');
+    if (existing) existing.remove();
+
+    const d = await api(`/api/leads/${leadId}/emails`);
+    if (!d || !d.emails || d.emails.length === 0) {
+        toast('No email details found', 'info');
+        return;
+    }
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'email-details-dropdown';
+
+    const header = `<div class="edd-header">
+        <span>📧 ${d.emails.length} Email${d.emails.length > 1 ? 's' : ''} Received</span>
+        <button class="edd-close" onclick="this.closest('.email-details-dropdown').remove()">✕</button>
+    </div>`;
+
+    const rows = d.emails.map((em, idx) => {
+        const tagLabel = em.tag ? `<span class="badge badge-role badge-${em.tag.toLowerCase()}">${em.tag}</span>` : '';
+        return `<div class="edd-item ${idx === 0 ? 'edd-latest' : ''}">
+            ${idx === 0 ? '<span class="edd-latest-label">Latest</span>' : `<span class="edd-idx">#${idx + 1}</span>`}
+            <div class="edd-row"><span class="edd-label">Subject:</span> <span class="edd-val">${esc((em.subject || '').substring(0, 80))}${(em.subject || '').length > 80 ? '…' : ''}</span></div>
+            <div class="edd-row"><span class="edd-label">Source:</span> <span class="source-badge">${esc(em.source || '-')}</span> ${tagLabel}</div>
+            <div class="edd-row"><span class="edd-label">Config:</span> ${esc(em.configuration || '-')} &nbsp;|&nbsp; <span class="edd-label">Price:</span> ${esc(em.price || '-')}</div>
+            <div class="edd-row"><span class="edd-label">Location:</span> ${esc(em.preferred_location || '-')}</div>
+            <div class="edd-row"><span class="edd-label">Arrived:</span> <span style="color:var(--cyan)">${timeAgo(em.received_at)}</span></div>
+            ${em.notes ? `<div class="edd-row edd-notes"><span class="edd-label">Notes:</span> ${esc(em.notes.substring(0, 120))}${em.notes.length > 120 ? '…' : ''}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    dropdown.innerHTML = header + '<div class="edd-body">' + rows + '</div>';
+    document.body.appendChild(dropdown);
+
+    // Position near the badge
+    const rect = badgeEl.getBoundingClientRect();
+    const dropW = 380;
+    const dropH = Math.min(d.emails.length * 170 + 50, 400);
+    let left = rect.left + rect.width / 2 - dropW / 2;
+    let top = rect.bottom + 8;
+    // Keep within viewport
+    if (left < 8) left = 8;
+    if (left + dropW > window.innerWidth - 8) left = window.innerWidth - dropW - 8;
+    if (top + dropH > window.innerHeight - 8) top = rect.top - dropH - 8;
+    dropdown.style.left = left + 'px';
+    dropdown.style.top = top + 'px';
+
+    // Close on outside click
+    setTimeout(() => {
+        const closeHandler = (e) => {
+            if (!dropdown.contains(e.target) && e.target !== badgeEl) {
+                dropdown.remove();
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        document.addEventListener('click', closeHandler);
+    }, 100);
+};
 window.deleteLead = async function (id) {
     if (!confirm('Delete this lead?')) return;
     await api(`/api/leads/${id}`, { method: 'DELETE' });
     toast('Lead deleted');
     loadLeads();
+};
+
+window.reEngageLead = async function (id, name) {
+    if (!confirm(`Send re-engagement template to "${name}"?\n\nThis sends the WhatsApp template message to re-open the conversation window.`)) return;
+    const r = await api(`/api/leads/${id}/force-welcome`, {
+        method: 'POST',
+        body: { re_engage: true }
+    });
+    if (r && r.status === 'ok') {
+        toast('📩 Re-engagement template sent!');
+    } else {
+        toast(r?.error || 'Failed to send', 'error');
+    }
 };
 
 window.updateTag = async function (id, selectEl) {
@@ -424,6 +577,16 @@ window.selectChat = async function (leadId) {
     autoLabel.textContent = autoOn ? 'Auto: ON' : 'Auto: OFF';
     autoLabel.className = `wa-auto-label ${autoOn ? 'on' : 'off'}`;
 
+    // Welcome re-send button status
+    const welcomeBtn = $('btn-resend-welcome');
+    if (d.media_sent) {
+        welcomeBtn.style.opacity = '0.5';
+        welcomeBtn.title = 'Welcome sequence already sent. Click to queue re-send.';
+    } else {
+        welcomeBtn.style.opacity = '1';
+        welcomeBtn.title = 'Welcome sequence queued — will send on next reply';
+    }
+
     // Render messages with media gallery clustering
     const box = $('wa-messages');
     if (!d.messages || d.messages.length === 0) {
@@ -495,6 +658,13 @@ window.selectChat = async function (leadId) {
         }
         box.innerHTML = html;
         box.scrollTop = box.scrollHeight;
+        // Defer scroll to after images/videos load (they change scrollHeight)
+        setTimeout(() => { box.scrollTop = box.scrollHeight; }, 100);
+        setTimeout(() => { box.scrollTop = box.scrollHeight; }, 500);
+        box.querySelectorAll('img, video').forEach(el => {
+            el.addEventListener('load', () => { box.scrollTop = box.scrollHeight; }, { once: true });
+            el.addEventListener('loadedmetadata', () => { box.scrollTop = box.scrollHeight; }, { once: true });
+        });
 
         // Track the last seen message ID so the poller knows when something is new
         if (msgs.length > 0) _lastSeenMsgId = msgs[msgs.length - 1].id;
@@ -643,6 +813,19 @@ $('btn-toggle-auto').addEventListener('click', async () => {
     }
 });
 
+// Re-send welcome sequence
+$('btn-resend-welcome').addEventListener('click', async () => {
+    if (!currentLeadId) return;
+    if (!confirm('Re-send the full welcome media sequence (photos + videos) on the next reply from this lead?')) return;
+    const r = await api(`/api/chats/${currentLeadId}/reset-welcome`, { method: 'POST' });
+    if (r) {
+        $('btn-resend-welcome').style.opacity = '1';
+        $('btn-resend-welcome').title = 'Welcome sequence queued — will send on next reply';
+        toast('Welcome media sequence reset. It will re-send on the next reply from this lead.');
+        loadChats();
+    }
+});
+
 // Simulate incoming message modal
 $('btn-simulate').addEventListener('click', () => show($('simulate-modal')));
 $('sim-modal-close').addEventListener('click', () => hide($('simulate-modal')));
@@ -750,9 +933,94 @@ async function checkAI() {
     }
 }
 
+// ─── Quarantine ──────────────────────
+async function loadQuarantine() {
+    const d = await api('/api/quarantine');
+    const stats = await api('/api/quarantine/stats', { silent: true });
+    const tb = $('quarantine-tbody');
+    const statsEl = $('quarantine-stats');
+
+    // Update badge
+    const badge = $('nav-quarantine-badge');
+    const qCount = d ? d.total : 0;
+    if (qCount > 0) { badge.textContent = qCount; badge.style.display = ''; }
+    else { badge.style.display = 'none'; }
+
+    // Stats header
+    if (stats) {
+        const byStatus = stats.by_status || {};
+        statsEl.innerHTML = `
+            <div class="quarantine-stat-row">
+                <span class="quarantine-stat"><strong>${stats.total_raw_emails}</strong> total emails</span>
+                <span class="quarantine-stat parsed"><strong>${byStatus.parsed || 0}</strong> parsed</span>
+                <span class="quarantine-stat pending"><strong>${byStatus.pending || 0}</strong> pending</span>
+                <span class="quarantine-stat warning"><strong>${byStatus.quarantined || 0}</strong> quarantined</span>
+                <span class="quarantine-stat error"><strong>${byStatus.error || 0}</strong> errors</span>
+            </div>`;
+    }
+
+    if (!d || d.total === 0) {
+        tb.innerHTML = '<tr><td colspan="7" class="empty-state">No quarantined emails. All leads captured!</td></tr>';
+        return;
+    }
+
+    tb.innerHTML = d.emails.map(e => {
+        const p = e.parsed_data || {};
+        const reasonBadge = e.status === 'error'
+            ? '<span class="badge badge-error">ERROR</span>'
+            : '<span class="badge badge-warning">NO PHONE</span>';
+        return `
+        <tr>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.subject || '')}">${esc(e.subject || '(no subject)')}</td>
+            <td style="font-size:11px">${esc(e.sender || '-')}</td>
+            <td>${esc(p.name || '-')}</td>
+            <td>${esc(p.phone || '-')}</td>
+            <td>${reasonBadge}<br><span style="font-size:11px;color:var(--text-muted)">${esc(e.quarantine_reason || '')}</span></td>
+            <td style="font-size:12px">${timeAgo(e.received_at)}</td>
+            <td class="action-btns">
+                <button class="action-btn" onclick="reparseEmail(${e.id})">Re-parse</button>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+window.reparseEmail = async function (rawId) {
+    toast('Re-parsing...', 'info');
+    const r = await api(`/api/quarantine/${rawId}/reparse`, { method: 'POST' });
+    if (r && r.status === 'created') {
+        toast(`Lead created: ${r.name} (${r.phone})`);
+    } else if (r && r.status === 'still_quarantined') {
+        toast('Still no phone found after re-parse', 'error');
+    } else {
+        toast('Re-parse failed', 'error');
+    }
+    loadQuarantine();
+};
+
+$('btn-reparse-all').addEventListener('click', async () => {
+    if (!confirm('Re-parse ALL quarantined emails through the updated parser?')) return;
+    toast('Re-parsing all...', 'info');
+    const r = await api('/api/quarantine/reparse-all', { method: 'POST' });
+    if (r) toast(`Re-processed ${r.reset_count} emails`);
+    loadQuarantine();
+    loadLeads();
+    loadDashboard();
+});
+
+// Update quarantine badge on dashboard load
+async function updateQuarantineBadge() {
+    const d = await api('/api/quarantine/stats', { silent: true });
+    if (!d) return;
+    const qCount = (d.by_status?.quarantined || 0) + (d.by_status?.error || 0);
+    const badge = $('nav-quarantine-badge');
+    if (qCount > 0) { badge.textContent = qCount; badge.style.display = ''; }
+    else { badge.style.display = 'none'; }
+}
+
 // ─── Init ──────────────────────
 loadDashboard();
 checkAI();
+updateQuarantineBadge();
 
 // ─── Background Polling ──────────────────
 // Refresh dashboard and leads automatically every 15 seconds

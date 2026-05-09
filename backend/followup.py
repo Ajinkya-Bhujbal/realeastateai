@@ -3,16 +3,18 @@ Follow-up automation + Unread message auto-reply processor + Email polling.
 APScheduler based.
 """
 import os
+import re
 import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.orm import Session
 from db import SessionLocal
-from models import Lead, Message, FollowUpSchedule
+from models import Lead, Message, FollowUpSchedule, RawEmail
+from wa_guard import can_send_to
 from whatsapp import send_whatsapp_message
 from ai import generate_followup_message, generate_rag_reply
 from rag import search_kb, search_properties
-from parser import fetch_gmail_leads
+from parser import fetch_gmail_leads, mark_email_seen
 
 # Global scheduler
 scheduler = BackgroundScheduler(
@@ -145,14 +147,6 @@ def process_unread_messages():
                     db.commit()
                     continue
 
-                # Skip auto-reply for leads parsed from email (only reply to manual/whatsapp leads)
-                if lead.source not in ["manual", "whatsapp"]:
-                    for m in msgs:
-                        m.is_auto_replied = True
-                        m.processing_lock_at = None
-                    db.commit()
-                    continue
-
                 if not lead.phone:
                     for m in msgs:
                         m.is_auto_replied = True
@@ -160,22 +154,31 @@ def process_unread_messages():
                     db.commit()
                     continue
 
-                # ── WELCOME SEQUENCE for first-time leads ──
-                if not lead.welcome_sent:
-                    import threading
-                    from welcome_sequence import send_welcome_sequence, get_welcome_db_messages
+                # ── WA Safety Guard: skip if not allowed to send ──
+                if not can_send_to(lead.phone):
+                    print(f"[WA Guard] Blocked send to {lead.phone} (live mode OFF, not in whitelist)")
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
 
-                    # Mark as sent immediately to prevent re-triggering by subsequent messages
-                    lead.welcome_sent = True
+                # ── MEDIA SEQUENCE for leads replying to welcome template ──
+                if lead.welcome_sent and not lead.media_sent:
+                    import threading
+                    from welcome_sequence import send_media_sequence, get_welcome_db_messages
+                    
+                    # Mark as sent immediately to prevent re-triggering
+                    lead.media_sent = True
                     for m in msgs:
                         m.is_auto_replied = True
                         m.processing_lock_at = None
                     db.commit()
 
-                    def _run_welcome(phone_num, lead_id_inner):
+                    def _run_media(phone_num, lead_id_inner):
                         try:
-                            result = send_welcome_sequence(phone_num)
-                            print(f"[Followup] Welcome sent to {phone_num}: {result}")
+                            result = send_media_sequence(phone_num)
+                            print(f"[Followup] Media sequence sent to {phone_num}: {result}")
                             wdb = SessionLocal()
                             try:
                                 for m in get_welcome_db_messages():
@@ -185,12 +188,12 @@ def process_unread_messages():
                             finally:
                                 wdb.close()
                         except Exception as e:
-                            print(f"[Followup] Welcome error: {e}")
+                            print(f"[Followup] Media sequence error: {e}")
 
-                    thread = threading.Thread(target=_run_welcome, args=(lead.phone, lead.id))
+                    thread = threading.Thread(target=_run_media, args=(lead.phone, lead.id))
                     thread.daemon = True
                     thread.start()
-                    continue  # Don't send AI reply for the first message — welcome handles it
+                    continue  # Media sequence handles the first reply — skip AI reply
 
                 # ── Combine ALL pending messages for intent detection + AI context ──
                 combined_msg_text = "\n".join(m.content for m in msgs if m.content)
@@ -227,12 +230,12 @@ def process_unread_messages():
                     context_parts.append(f"Type: {lead.property_type}")
                 lead_context = ", ".join(context_parts)
 
-                # Fetch recent conversation history for this lead
+                # Fetch recent conversation history for this lead (last 30 messages)
                 recent_messages = (
                     db.query(Message)
                     .filter(Message.lead_id == lead.id)
                     .order_by(Message.created_at.desc())
-                    .limit(20)
+                    .limit(30)
                     .all()
                 )
                 conversation_history = [
@@ -244,6 +247,12 @@ def process_unread_messages():
                 # ── LOCATION SEQUENCE ──
                 if wants_location:
                     _send_location_sequence(lead, db)
+                    # Mark all as replied and skip AI reply — location sequence already answers
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
 
                 # ── Generate AI reply addressing ALL pending messages ──
                 # If multiple messages, tell AI about all of them
@@ -336,14 +345,8 @@ LOCATION_MESSAGES = [
         "Shared route: https://maps.app.goo.gl/34qg3NuAyQH2uj5b8?g_st=awb"
     ),
     (
-        "Sending *Gate-Pass* Below so that Security will allow you in...\n"
-        "( No Fees Charged 😊)\n"
-        "👇👇👇👇👇"
-    ),
-    (
-        "🚗 Please park your Vehicles *outside* the society main gate to avoid fines and Jammers.\n"
-        "🪪 Show above gatepass to security if they ask.\n\n"
-        " And come to Tower 1 , Oak , A wing, Flat No 1802.. on the 18th floor.\n"
+        "🚗 Please park your Vehicles *outside* the society main gate to avoid fines and Jammers.\n\n"
+        "Come to Tower 1 , Oak , A wing, Flat No 1802.. on the 18th floor.\n"
         "Agent contact 📞  - 7387457889"
     ),
 ]
@@ -387,55 +390,106 @@ def _send_location_sequence(lead, db):
     print(f"Location sequence sent to {lead.name}")
 
 
-def _send_media_on_request(lead, db):
-    """Send ALL photos and videos when user explicitly asks."""
-    import time as _time
-    from welcome_sequence import get_amenity_photos, get_flat_videos
-    from whatsapp import upload_whatsapp_media as _upload, send_whatsapp_message
+def _generate_media_caption(filename: str, media_type: str = "photo") -> str:
+    """Generate a short, friendly caption for a media file based on its filename."""
+    from ai import generate
+    # Extract a human-readable name from the filename
+    name = filename.rsplit(".", 1)[0]  # Remove extension
+    # Remove leading numbers and underscores (e.g. "05_swimming_pool" -> "swimming pool")
+    import re
+    name = re.sub(r'^\d+[_\-\s]*', '', name).replace('_', ' ').replace('-', ' ').strip()
+    if not name:
+        name = media_type
+
+    prompt = f"""Write a SINGLE short WhatsApp caption (max 10 words) for a {media_type} of "{name}" at a premium residential township called Vanaha in Bavdhan, Pune. 
+Use 1-2 relevant emojis. Be enthusiastic but brief. No hashtags. Just the caption, nothing else.
+Caption:"""
     try:
-        # First send the disclaimer
-        disclaimer = "Please Note: These are videos of sample flat layout, the layout of all the flats is the same. 😊"
-        send_whatsapp_message(lead.phone, disclaimer)
-        db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
-                       content=disclaimer, status="sent", is_read=True))
-        _time.sleep(1)
+        caption = generate(prompt, max_tokens=30, temperature=0.6).strip()
+        # Clean up - remove quotes if LLM wraps it
+        caption = caption.strip('"\'')
+        if caption and not caption.startswith("["):
+            return caption
+    except Exception as e:
+        print(f"Caption generation error for {filename}: {e}")
+    # Fallback: readable name with emoji
+    return f"📸 {name.title()}" if media_type == "photo" else f"🎬 {name.title()}"
 
-        # Send ALL amenity photos
-        photos = get_amenity_photos()
-        for photo_path in photos:
-            try:
-                fname = os.path.basename(photo_path)
-                with open(photo_path, "rb") as f:
-                    file_bytes = f.read()
-                ext = fname.rsplit(".", 1)[-1].lower()
-                mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
-                media_id = _upload(file_bytes, mime, fname)
-                if media_id:
-                    send_whatsapp_message(lead.phone, media_id=media_id, media_type="image")
-                db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
-                               content=f"[IMAGE:{fname}]", status="sent", is_read=True))
-                _time.sleep(1)
-            except Exception as pe:
-                print(f"Photo send error: {pe}")
 
-        # Send ALL flat videos
-        videos = get_flat_videos()
-        for video_path in videos:
-            try:
-                fname = os.path.basename(video_path)
-                with open(video_path, "rb") as f:
-                    file_bytes = f.read()
-                media_id = _upload(file_bytes, "video/mp4", fname)
-                if media_id:
-                    send_whatsapp_message(lead.phone, media_id=media_id, media_type="video")
-                db.add(Message(lead_id=lead.id, direction="out", channel="whatsapp",
-                               content=f"[VIDEO:{fname}]", status="sent", is_read=True))
-                _time.sleep(5)  # 5s between videos (larger files, need more time for WhatsApp processing)
-            except Exception as ve:
-                print(f"Video send error: {ve}")
-        print(f"Media sent to {lead.name}: {len(photos)} photos, {len(videos)} videos")
-    except Exception as me:
-        print(f"Media sending error: {me}")
+def _send_media_on_request(lead, db):
+    """Send ALL photos and videos when user explicitly asks — runs in background thread with LLM captions."""
+    import threading
+
+    def _run_media_request(phone_num, lead_id_inner):
+        import time as _time
+        from welcome_sequence import get_amenity_photos, get_flat_videos
+        from whatsapp import upload_whatsapp_media as _upload, send_whatsapp_message
+        wdb = SessionLocal()
+        try:
+            # Intro message for photos
+            photo_intro = "Here are the photos of amenities at Vanaha Township 📸👇"
+            send_whatsapp_message(phone_num, photo_intro)
+            wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                           content=photo_intro, status="sent", is_read=True))
+            wdb.commit()
+            _time.sleep(1)
+
+            # Send ALL amenity photos with LLM captions
+            photos = get_amenity_photos()
+            for photo_path in photos:
+                try:
+                    fname = os.path.basename(photo_path)
+                    caption = _generate_media_caption(fname, "photo")
+                    with open(photo_path, "rb") as f:
+                        file_bytes = f.read()
+                    ext = fname.rsplit(".", 1)[-1].lower()
+                    mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                    media_id = _upload(file_bytes, mime, fname)
+                    if media_id:
+                        send_whatsapp_message(phone_num, message=caption, media_id=media_id, media_type="image")
+                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                   content=f"[IMAGE:{fname}] {caption}", status="sent", is_read=True))
+                    wdb.commit()
+                    _time.sleep(2)
+                except Exception as pe:
+                    print(f"Photo send error: {pe}")
+
+            _time.sleep(5)
+
+            # Intro message for videos
+            video_intro = "Here are the flat walkthrough videos 🎬👇"
+            send_whatsapp_message(phone_num, video_intro)
+            wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                           content=video_intro, status="sent", is_read=True))
+            wdb.commit()
+            _time.sleep(1)
+
+            # Send ALL flat videos with LLM captions
+            videos = get_flat_videos()
+            for video_path in videos:
+                try:
+                    fname = os.path.basename(video_path)
+                    caption = _generate_media_caption(fname, "video")
+                    with open(video_path, "rb") as f:
+                        file_bytes = f.read()
+                    media_id = _upload(file_bytes, "video/mp4", fname)
+                    if media_id:
+                        send_whatsapp_message(phone_num, message=caption, media_id=media_id, media_type="video")
+                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                   content=f"[VIDEO:{fname}] {caption}", status="sent", is_read=True))
+                    wdb.commit()
+                    _time.sleep(5)
+                except Exception as ve:
+                    print(f"Video send error: {ve}")
+            print(f"[MediaRequest] Sent to {phone_num}: {len(photos)} photos, {len(videos)} videos with captions")
+        except Exception as me:
+            print(f"Media sending error: {me}")
+        finally:
+            wdb.close()
+
+    thread = threading.Thread(target=_run_media_request, args=(lead.phone, lead.id))
+    thread.daemon = True
+    thread.start()
 
 
 def process_followups():
@@ -538,10 +592,19 @@ def create_followup_schedule(
 
 def process_email_leads():
     """
-    Periodically fetch new leads from Gmail.
-    Only processes UNSEEN emails from real estate portals.
-    Deduplicates by phone and email.
+    Two-phase email processing for 100% lead capture.
+    
+    PHASE 1 — FETCH & STORE: Get UNSEEN emails from Gmail, store raw data
+    in raw_emails table. Deduplicates by Message-ID. Only marks as SEEN
+    in Gmail AFTER safe storage. Crash-safe: if server dies mid-fetch,
+    unstored emails stay UNSEEN and are re-fetched next cycle.
+    
+    PHASE 2 — PARSE & CREATE: Process all 'pending' raw_emails through
+    the parser. Leads with phone → created. Leads without phone →
+    quarantined (not silently skipped). Parse errors → quarantined with
+    error details for debugging.
     """
+    import json
     gmail_user = os.getenv("GMAIL_USER", "")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
     if not gmail_user or not gmail_pass:
@@ -549,23 +612,137 @@ def process_email_leads():
 
     db = SessionLocal()
     try:
-        # fetch_gmail_leads is now a generator yielding leads newest-first
+        # ── PHASE 1: FETCH & STORE RAW EMAILS ──
+        fetched = 0
+        deduped = 0
         lead_generator = fetch_gmail_leads(gmail_user, gmail_pass, max_emails=None)
-        created = 0
-        skipped = 0
-        consecutive_duplicates = 0
 
         for parsed in lead_generator:
+            raw_data = parsed.get("_raw", {})
+            imap_info = parsed.get("_imap")
+            gmail_message_id = raw_data.get("gmail_message_id", "")
+
+            if not gmail_message_id:
+                continue
+
+            # Dedup: skip if this Message-ID is already in raw_emails
+            existing = db.query(RawEmail).filter(
+                RawEmail.gmail_message_id == gmail_message_id
+            ).first()
+            if existing:
+                deduped += 1
+                # Still mark as SEEN so it doesn't appear again
+                if imap_info:
+                    mark_email_seen(imap_info)
+                continue
+
+            # Store raw email — this is the crash-safe point
+            raw_email = RawEmail(
+                gmail_message_id=gmail_message_id,
+                subject=raw_data.get("subject", ""),
+                sender=raw_data.get("sender", ""),
+                body=raw_data.get("body", ""),
+                html_body=raw_data.get("html_body", ""),
+                status="pending",
+                received_at=raw_data.get("received_at"),
+                parse_result_json=json.dumps({
+                    k: v for k, v in parsed.items()
+                    if k not in ("_raw", "_imap") and not callable(v)
+                }, default=str),
+            )
+            db.add(raw_email)
+            db.commit()
+            fetched += 1
+
+            # Only mark as SEEN after safe storage
+            if imap_info:
+                mark_email_seen(imap_info)
+
+        if fetched > 0 or deduped > 0:
+            print(f"[Email Fetch] {fetched} new emails stored, {deduped} duplicates skipped")
+
+        # ── PHASE 2: PARSE PENDING RAW EMAILS → CREATE LEADS ──
+        _process_pending_raw_emails(db)
+
+    except Exception as e:
+        print(f"Email polling error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _process_pending_raw_emails(db):
+    """
+    Process all raw_emails with status='pending'.
+    Creates leads or quarantines entries that can't be parsed.
+    Can be called independently to re-process after parser fixes.
+    """
+    import json
+
+    pending = db.query(RawEmail).filter(RawEmail.status == "pending").all()
+    if not pending:
+        return
+
+    created = 0
+    quarantined = 0
+
+    for raw_email in pending:
+        try:
+            # Parse the stored result (was parsed during fetch)
+            parsed = json.loads(raw_email.parse_result_json) if raw_email.parse_result_json else {}
+
             name = parsed.get("name", "").strip() or "Unknown"
             phone = parsed.get("phone", "").strip()
             lead_email = parsed.get("email", "").strip()
 
-            # Skip junk emails that have no contact info
-            if not phone and not lead_email:
-                skipped += 1
+            # Detect tag from parsed data (DEALER, BROKER, OWNER)
+            parsed_tag = parsed.get("tag", "").strip().upper()
+
+            # Dedup by phone: check if lead with same phone already exists
+            if phone:
+                existing_lead = db.query(Lead).filter(Lead.phone == phone).first()
+                if existing_lead:
+                    # Update the existing lead's timestamp so it appears at the top
+                    if raw_email.received_at:
+                        existing_lead.updated_at = raw_email.received_at
+                    else:
+                        existing_lead.updated_at = datetime.datetime.now(datetime.timezone.utc)
+                    # Apply tag if existing lead has no meaningful tag and we found one
+                    if parsed_tag and (not existing_lead.tag or existing_lead.tag == "NEW"):
+                        existing_lead.tag = parsed_tag
+                    # Count email touches in notes
+                    touch_count = db.query(RawEmail).filter(
+                        RawEmail.lead_id == existing_lead.id
+                    ).count() + 1  # +1 for this one
+                    if touch_count > 1:
+                        existing_lead.notes = (existing_lead.notes or "").rstrip()
+                        if "\n📧 Email touches:" not in (existing_lead.notes or ""):
+                            existing_lead.notes = (existing_lead.notes or "") + f"\n📧 Email touches: {touch_count}"
+                        else:
+                            existing_lead.notes = re.sub(
+                                r"📧 Email touches: \d+",
+                                f"📧 Email touches: {touch_count}",
+                                existing_lead.notes
+                            )
+                    raw_email.status = "parsed"
+                    raw_email.lead_id = existing_lead.id
+                    raw_email.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+                    raw_email.quarantine_reason = f"Duplicate phone - linked to lead #{existing_lead.id}"
+                    db.commit()
+                    continue
+
+            # QUARANTINE if no phone (most important contact info)
+            if not phone:
+                raw_email.status = "quarantined"
+                raw_email.quarantine_reason = "no_phone"
+                raw_email.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+                db.commit()
+                quarantined += 1
                 continue
 
-
+            # Create the lead
             lead = Lead(
                 name=name,
                 phone=phone,
@@ -578,19 +755,60 @@ def process_email_leads():
                 property_type=parsed.get("property_type", ""),
                 configuration=parsed.get("configuration", ""),
                 price=parsed.get("price", ""),
+                tag=parsed_tag if parsed_tag else "NEW",
                 notes=parsed.get("notes", "")[:500],
             )
             # Use email received time instead of current time
-            if parsed.get("received_at"):
-                lead.created_at = parsed["received_at"]
+            if raw_email.received_at:
+                lead.created_at = raw_email.received_at
             db.add(lead)
-            db.commit()  # Commit immediately so UI updates live
+            db.flush()  # Get the lead ID
+
+            # Automatically trigger welcome template for new parsed leads
+            from wa_guard import can_send_to
+            if not lead.welcome_sent and can_send_to(lead.phone):
+                import threading
+                from welcome_sequence import send_welcome_sequence
+                import os
+                
+                def _run_welcome_auto(phone_num, lid, lname):
+                    try:
+                        from db import SessionLocal
+                        from models import Lead, Message
+                        res = send_welcome_sequence(phone_num, lead_name=lname)
+                        wdb = SessionLocal()
+                        try:
+                            wlead = wdb.query(Lead).filter(Lead.id == lid).first()
+                            if wlead:
+                                wlead.welcome_sent = True
+                                template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
+                                wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                                content=f"[Template Sent: {template_name}]", status="sent", is_read=True))
+                            wdb.commit()
+                        finally:
+                            wdb.close()
+                    except Exception as e:
+                        print(f"Auto-welcome error: {e}")
+
+                thread = threading.Thread(target=_run_welcome_auto, args=(lead.phone, lead.id, lead.name))
+                thread.daemon = True
+                thread.start()
+
+            raw_email.status = "parsed"
+            raw_email.lead_id = lead.id
+            raw_email.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+            db.commit()
             created += 1
 
-        if created > 0 or skipped > 0:
-            print(f"Email poller finished loop: {created} new leads created, {skipped} duplicates skipped")
-    except Exception as e:
-        print(f"Email polling error: {e}")
-        db.rollback()
-    finally:
-        db.close()
+        except Exception as e:
+            # Parse error — quarantine with error details
+            raw_email.status = "error"
+            raw_email.quarantine_reason = f"parse_error: {str(e)[:250]}"
+            raw_email.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+            db.commit()
+            quarantined += 1
+            print(f"[Email Parse Error] {raw_email.gmail_message_id}: {e}")
+
+    if created > 0 or quarantined > 0:
+        print(f"[Email Parse] {created} leads created, {quarantined} quarantined")
+

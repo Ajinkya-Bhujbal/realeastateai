@@ -36,6 +36,10 @@
                 <a href="#" class="nav-item" data-view="ai" id="nav-ai">
                     <span class="nav-icon">🤖</span> AI Tools
                 </a>
+                <a href="#" class="nav-item" data-view="quarantine" id="nav-quarantine">
+                    <span class="nav-icon">🔍</span> Quarantine
+                    <span class="nav-badge quarantine-badge" id="nav-quarantine-badge" style="display:none">0</span>
+                </a>
             </nav>
             <div class="sidebar-footer">
                 <span class="status-dot offline" id="ai-dot"></span>
@@ -69,6 +73,20 @@
                     <div class="card"><h3>Recent Leads</h3><div id="recent-leads-list" class="recent-leads"></div></div>
                     <div class="card"><h3>Leads by Source</h3><div id="source-chart"></div></div>
                 </div>
+                <!-- WhatsApp Live Mode Toggle -->
+                <div class="card wa-guard-card" id="wa-guard-card">
+                    <div class="wa-guard-header">
+                        <div>
+                            <h3>📱 WhatsApp Messaging</h3>
+                            <p class="wa-guard-desc" id="wa-guard-desc">Loading...</p>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="wa-live-toggle" onchange="toggleLiveMode(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="wa-guard-whitelist" id="wa-guard-whitelist"></div>
+                </div>
             </section>
 
             <!-- ═══ Leads View ═══ -->
@@ -78,7 +96,7 @@
                     <select id="filter-status" class="input"><option value="">All Status</option><option value="new">New</option><option value="contacted">Contacted</option><option value="interested">Interested</option><option value="converted">Converted</option><option value="lost">Lost</option></select>
                     <select id="filter-source" class="input"><option value="">All Sources</option><option value="housing">Housing.com</option><option value="99acres">99acres</option><option value="magicbricks">MagicBricks</option><option value="manual">Manual</option><option value="whatsapp">WhatsApp</option></select>
                 </div>
-                <div class="table-wrap"><table class="data-table"><thead><tr><th>Name</th><th>Phone</th><th>Source</th><th>Config</th><th>Price/Budget</th><th>Location</th><th>Created</th><th>Welcome</th><th>Tag</th><th>Actions</th></tr></thead><tbody id="leads-tbody"></tbody></table></div>
+                <div class="table-wrap"><table class="data-table"><thead><tr><th>Name</th><th>Phone</th><th>Source</th><th>Config</th><th>Price/Budget</th><th>Location</th><th>Arrived</th><th>Welcome</th><th>Tag</th><th>Actions</th></tr></thead><tbody id="leads-tbody"></tbody></table></div>
             </section>
 
             <!-- ═══ Messages View (WhatsApp Web) ═══ -->
@@ -110,6 +128,7 @@
                             <div class="wa-chat-header-actions" id="wa-chat-actions" style="display:none">
                                 <button class="btn-icon wa-auto-reply-btn" id="btn-toggle-auto" title="Toggle auto-reply">🤖</button>
                                 <span class="wa-auto-label" id="wa-auto-label">Auto: ON</span>
+                                <button class="btn-icon wa-resend-welcome-btn" id="btn-resend-welcome" title="Re-send welcome media sequence" style="margin-left:8px; font-size:14px; opacity:0.7;">🔄</button>
                             </div>
                         </div>
                         <div class="wa-messages" id="wa-messages">
@@ -175,6 +194,30 @@
                         <button class="btn btn-primary" id="btn-create-followup">Schedule</button>
                         <pre id="followup-result" class="result-box" style="display:none"></pre>
                     </div>
+                </div>
+            </section>
+
+            <!-- ═══ Quarantine View ═══ -->
+            <section class="view" id="view-quarantine">
+                <div class="quarantine-header">
+                    <div class="quarantine-stats" id="quarantine-stats"></div>
+                    <div class="quarantine-actions">
+                        <button class="btn btn-primary" id="btn-reparse-all">🔄 Re-parse All</button>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table class="data-table">
+                        <thead><tr>
+                            <th>Subject</th>
+                            <th>Sender</th>
+                            <th>Parsed Name</th>
+                            <th>Parsed Phone</th>
+                            <th>Reason</th>
+                            <th>Received</th>
+                            <th>Actions</th>
+                        </tr></thead>
+                        <tbody id="quarantine-tbody"></tbody>
+                    </table>
                 </div>
             </section>
         </main>

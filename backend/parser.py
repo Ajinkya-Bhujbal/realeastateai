@@ -29,6 +29,7 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
         "property_type": "",
         "configuration": "",
         "price": "",
+        "tag": "",
         "notes": "",
     }
 
@@ -184,7 +185,21 @@ def _parse_99acres(subject: str, body: str, html_body: str, result: dict) -> dic
                 for j in range(i + 1, min(i + 40, len(lines))):
                     name_line = lines[j].strip()
                     if name_line and not re.match(r'^[\+\d\-\(\)\s]+$', name_line) and "@" not in name_line and "verified" not in name_line.lower():
-                        result["name"] = name_line.split('[')[0].strip()
+                        # Detect [DEALER] or [BROKER] tag in the name line itself
+                        tag_match = re.search(r'\[(DEALER|BROKER)\]', name_line, re.IGNORECASE)
+                        if tag_match:
+                            result["tag"] = tag_match.group(1).upper()
+                        result["name"] = re.sub(r'\s*\[(?:DEALER|BROKER)\]\s*', '', name_line).strip()
+                        # Also check the NEXT line(s) for [DEALER]/[BROKER] tag
+                        # (99acres puts the tag on a separate line after the name)
+                        for k in range(j + 1, min(j + 3, len(lines))):
+                            next_line = lines[k].strip()
+                            tag_match2 = re.search(r'\[(DEALER|BROKER)\]', next_line, re.IGNORECASE)
+                            if tag_match2:
+                                result["tag"] = tag_match2.group(1).upper()
+                                break
+                            if next_line and not re.match(r'^\[', next_line):
+                                break  # Stop if we hit a non-tag line
                         break
                 break
 
@@ -315,32 +330,55 @@ def _follow_housing_redirect(html_body: str) -> str:
     
     return ""
 
+def _clean_housing_name(raw_name: str) -> str:
+    """Clean Housing.com name — preserves role suffixes like (Owner), (Broker) for context."""
+    return raw_name.strip()
+
+
 def _parse_housing(subject: str, body: str, html_body: str, result: dict) -> dict:
     combined = body + "\n" + html_body
 
-    # Name: from HTML: <div>Name:</div>...<div style="...bold">Priya</div>
-    if html_body:
-        # Pattern: Name: label followed by bold div with the actual name
-        name_match = re.search(r'Name:\s*</div>\s*</td>\s*<td>\s*<div[^>]*>\s*([A-Za-z][A-Za-z\s]{1,40})\s*</div>', html_body, re.IGNORECASE)
-        if name_match:
-            result["name"] = name_match.group(1).strip()
-    # Fallback: from header text "Priya would like to talk to you"
-    if not result["name"]:
-        match = re.search(r"([A-Za-z][A-Za-z\s]{1,40})\s+would\s+like\s+to\s+talk", html_body or combined, re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            if name.lower() not in ('a user', 'someone', 'buyer'):
-                result["name"] = name
-    # Fallback: from subject
+    # --- Name extraction (ordered by reliability) ---
+    # Housing.com subjects are the most reliable: "Harsh Raj (Owner) would like to talk to you"
+    # Try subject FIRST to avoid matching "who would like to talk" from the body text.
+
+    # Priority 1: Subject line — always has clean name for Housing.com
     if not result["name"]:
         match = re.search(r"^(.+?)\s+would\s+like\s+to\s+talk", subject, re.IGNORECASE)
         if match:
-            result["name"] = match.group(1).strip()
-    # Fallback: "Name: X" in text
+            raw_name = match.group(1).strip()
+            # Detect (Owner), (Broker), (Dealer) role suffix and set as tag
+            role_match = re.search(r'\((Owner|Broker|Dealer)\)', raw_name, re.IGNORECASE)
+            if role_match:
+                result["tag"] = role_match.group(1).upper()
+            result["name"] = _clean_housing_name(raw_name)
+
+    # Priority 2: HTML structured data — Name: label followed by bold div
+    if not result["name"] and html_body:
+        # Handle names with optional parenthesized role: "Harsh Raj (Owner)"
+        name_match = re.search(
+            r'Name:\s*</div>\s*</td>\s*<td>\s*<div[^>]*>\s*([A-Za-z][A-Za-z\s]{1,40}(?:\s*\([^)]*\))?)\s*</div>',
+            html_body, re.IGNORECASE
+        )
+        if name_match:
+            result["name"] = _clean_housing_name(name_match.group(1).strip())
+
+    # Priority 3: Body/HTML text "Name would like to talk" — handle (Owner)/(Broker) suffix
+    if not result["name"]:
+        match = re.search(
+            r"([A-Za-z][A-Za-z\s]{1,40})\s*(?:\([^)]*\))?\s+would\s+like\s+to\s+talk",
+            html_body or combined, re.IGNORECASE
+        )
+        if match:
+            name = match.group(1).strip()
+            if name.lower() not in ('a user', 'someone', 'buyer', 'who'):
+                result["name"] = _clean_housing_name(name)
+
+    # Priority 4: "Name: X" in plain text
     if not result["name"]:
         match = re.search(r"Name\s*[:\-]\s*([A-Za-z][A-Za-z ]{1,40})", combined, re.IGNORECASE)
         if match:
-            result["name"] = match.group(1).strip()
+            result["name"] = _clean_housing_name(match.group(1).strip())
 
     # Phone: Housing.com hides phone behind redirect URLs (hsng.co/HOUSNG/...)
     # Strategy: find hsng.co URLs in HTML, follow redirects to get final wa.me or tel URL
@@ -639,7 +677,10 @@ def fetch_gmail_leads(
     Fetch leads from Gmail using IMAP.
     Requires an App Password (not regular password).
     Searches for UNSEEN emails from real estate portals.
-    Returns both plain text and HTML bodies for full extraction.
+    
+    Uses BODY.PEEK[] to avoid marking emails as SEEN automatically.
+    Yields dicts with parsed data + raw email fields for staging.
+    The caller is responsible for marking emails as SEEN after safe storage.
     """
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -672,12 +713,19 @@ def fetch_gmail_leads(
         for eid_int in sorted_ids:
             print(f"Processing email ID: {eid_int}")
             eid = str(eid_int).encode()
-            status, msg_data = mail.fetch(eid, "(RFC822)")
+            # Use BODY.PEEK[] to NOT mark as SEEN — we mark it manually after safe storage
+            status, msg_data = mail.fetch(eid, "(BODY.PEEK[])")
             if status != "OK":
                 continue
 
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
+
+            # Extract RFC Message-ID header for deduplication
+            gmail_message_id = msg.get("Message-ID", "").strip()
+            if not gmail_message_id:
+                # Fallback: generate a synthetic ID from sender + date + subject
+                gmail_message_id = f"synth-{eid_int}-{msg.get('Date', '')}-{msg.get('Subject', '')}"
 
             subject = ""
             raw_subject = msg.get("Subject", "")
@@ -696,7 +744,13 @@ def fetch_gmail_leads(
             if email_date:
                 try:
                     from email.utils import parsedate_to_datetime
+                    import datetime as _dt
                     received_at = parsedate_to_datetime(email_date)
+                    # Convert to UTC naive datetime for consistent storage
+                    # (SQLite has no timezone support — if we store IST as-is,
+                    #  it gets treated as UTC by the frontend, causing ~5.5h drift)
+                    if received_at.tzinfo is not None:
+                        received_at = received_at.astimezone(_dt.timezone.utc).replace(tzinfo=None)
                 except Exception:
                     pass
 
@@ -704,11 +758,33 @@ def fetch_gmail_leads(
             lead = parse_lead_from_email(subject, body, sender, html_body)
             lead["raw_subject"] = subject
             lead["received_at"] = received_at  # actual email timestamp
+            # Attach raw email data for staging
+            lead["_raw"] = {
+                "gmail_message_id": gmail_message_id,
+                "subject": subject,
+                "sender": sender,
+                "body": body,
+                "html_body": html_body,
+                "received_at": received_at,
+                "imap_uid": eid_int,
+            }
+            # Attach mail connection + eid for marking as SEEN after safe storage
+            lead["_imap"] = {"mail": mail, "eid": eid}
             yield lead
 
         mail.logout()
     except Exception as e:
         print(f"Gmail fetch error: {e}")
+
+
+def mark_email_seen(imap_info: dict):
+    """Mark an email as SEEN in Gmail after it has been safely stored in raw_emails."""
+    try:
+        mail = imap_info["mail"]
+        eid = imap_info["eid"]
+        mail.store(eid, '+FLAGS', '\\Seen')
+    except Exception as e:
+        print(f"Warning: could not mark email as seen: {e}")
 
 
 def _get_email_bodies(msg) -> tuple:

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db import get_db, init_db, SessionLocal, engine
-from models import Lead, Message, Property, FollowUpSchedule
+from models import Lead, Message, Property, FollowUpSchedule, RawEmail
 from parser import parse_lead_from_email, fetch_gmail_leads
 from whatsapp import send_whatsapp_message, verify_webhook, parse_webhook_message, upload_whatsapp_media
 from ai import (
@@ -35,7 +35,8 @@ from rag import (
     search_properties, index_property, load_sample_properties, index_properties_bulk,
     search_kb, index_kb_folder, get_kb_status,
 )
-from followup import start_scheduler, stop_scheduler, create_followup_schedule
+from followup import start_scheduler, stop_scheduler, create_followup_schedule, _process_pending_raw_emails
+from wa_guard import is_live_mode, set_live_mode, can_send_to, get_whitelist
 
 
 # ─── Pydantic Schemas ────────────────────────────────────────────────
@@ -249,7 +250,9 @@ def list_leads(
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
-    """List all leads with optional filters."""
+    """List all leads with optional filters. Sorted by most recent activity (latest email arrival)."""
+    from sqlalchemy import func
+
     q = db.query(Lead)
     if status:
         q = q.filter(Lead.status == status)
@@ -262,7 +265,20 @@ def list_leads(
             | (Lead.email.ilike(f"%{search}%"))
         )
     total = q.count()
-    leads = q.order_by(Lead.created_at.desc()).offset(skip).limit(limit).all()
+    # Sort by updated_at DESC (reflects latest email arrival), then created_at DESC
+    leads = q.order_by(Lead.updated_at.desc(), Lead.created_at.desc()).offset(skip).limit(limit).all()
+
+    # Get email counts per lead from raw_emails table
+    lead_ids = [l.id for l in leads]
+    email_counts = {}
+    if lead_ids:
+        counts = (
+            db.query(RawEmail.lead_id, func.count(RawEmail.id))
+            .filter(RawEmail.lead_id.in_(lead_ids))
+            .group_by(RawEmail.lead_id)
+            .all()
+        )
+        email_counts = {lid: cnt for lid, cnt in counts}
 
     return {
         "total": total,
@@ -283,12 +299,51 @@ def list_leads(
                 "tag": l.tag,
                 "notes": l.notes,
                 "welcome_sent": l.welcome_sent if hasattr(l, 'welcome_sent') else False,
+                "email_count": email_counts.get(l.id, 0),
                 "created_at": l.created_at.isoformat() if l.created_at else None,
                 "updated_at": l.updated_at.isoformat() if l.updated_at else None,
             }
             for l in leads
         ],
     }
+
+
+@app.get("/api/leads/{lead_id}/emails")
+def get_lead_emails(lead_id: int, db: Session = Depends(get_db)):
+    """Get all raw emails linked to a lead (for viewing duplicate email details)."""
+    import json
+    raw_emails = (
+        db.query(RawEmail)
+        .filter(RawEmail.lead_id == lead_id)
+        .order_by(RawEmail.received_at.desc())
+        .all()
+    )
+    result = []
+    for re_obj in raw_emails:
+        parsed = {}
+        if re_obj.parse_result_json:
+            try:
+                parsed = json.loads(re_obj.parse_result_json)
+            except Exception:
+                pass
+        result.append({
+            "id": re_obj.id,
+            "subject": re_obj.subject,
+            "sender": re_obj.sender,
+            "status": re_obj.status,
+            "received_at": re_obj.received_at.isoformat() if re_obj.received_at else None,
+            "name": parsed.get("name", ""),
+            "phone": parsed.get("phone", ""),
+            "email": parsed.get("email", ""),
+            "source": parsed.get("source", ""),
+            "configuration": parsed.get("configuration", ""),
+            "price": parsed.get("price", ""),
+            "preferred_location": parsed.get("preferred_location", ""),
+            "property_type": parsed.get("property_type", ""),
+            "tag": parsed.get("tag", ""),
+            "notes": (parsed.get("notes", "") or "")[:200],
+        })
+    return {"lead_id": lead_id, "emails": result}
 
 
 @app.get("/api/leads/{lead_id}")
@@ -832,7 +887,164 @@ def dashboard_stats(db: Session = Depends(get_db)):
             {"id": l.id, "name": l.name, "source": l.source, "status": l.status, "price": l.price, "preferred_location": l.preferred_location, "property_type": l.property_type, "created_at": l.created_at.isoformat() if l.created_at else None}
             for l in recent
         ],
+        "quarantined_emails": db.query(RawEmail).filter(RawEmail.status.in_(["quarantined", "error"])).count(),
     }
+
+
+# ─── WhatsApp Live Mode Toggle ────────────────────────────────────────
+
+@app.get("/api/wa/live-mode")
+def get_wa_live_mode():
+    """Get WhatsApp live mode status and whitelist."""
+    return {
+        "live_mode": is_live_mode(),
+        "whitelist": sorted(get_whitelist()),
+    }
+
+
+@app.post("/api/wa/live-mode")
+def set_wa_live_mode(req: dict):
+    """Toggle WhatsApp live mode on/off."""
+    enabled = req.get("enabled", False)
+    set_live_mode(bool(enabled))
+    return {
+        "live_mode": is_live_mode(),
+        "whitelist": sorted(get_whitelist()),
+        "message": f"Live mode {'ENABLED — messages will be sent to ALL leads' if enabled else 'DISABLED — only whitelisted numbers will receive messages'}",
+    }
+
+
+# ─── Quarantine API (Email Audit) ─────────────────────────────────────
+
+@app.get("/api/quarantine")
+def list_quarantined(status: Optional[str] = None, db: Session = Depends(get_db)):
+    """List quarantined/error emails that need review."""
+    q = db.query(RawEmail)
+    if status:
+        q = q.filter(RawEmail.status == status)
+    else:
+        q = q.filter(RawEmail.status.in_(["quarantined", "error"]))
+    raw_emails = q.order_by(RawEmail.fetched_at.desc()).limit(100).all()
+
+    import json
+    return {
+        "total": len(raw_emails),
+        "emails": [
+            {
+                "id": r.id,
+                "subject": r.subject,
+                "sender": r.sender,
+                "status": r.status,
+                "quarantine_reason": r.quarantine_reason,
+                "parsed_data": json.loads(r.parse_result_json) if r.parse_result_json else {},
+                "lead_id": r.lead_id,
+                "received_at": r.received_at.isoformat() if r.received_at else None,
+                "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+            }
+            for r in raw_emails
+        ],
+    }
+
+
+@app.get("/api/quarantine/stats")
+def quarantine_stats(db: Session = Depends(get_db)):
+    """Get quarantine statistics."""
+    from sqlalchemy import func
+    total = db.query(RawEmail).count()
+    by_status = dict(db.query(RawEmail.status, func.count(RawEmail.id)).group_by(RawEmail.status).all())
+    return {
+        "total_raw_emails": total,
+        "by_status": by_status,
+    }
+
+
+@app.post("/api/quarantine/{raw_email_id}/reparse")
+def reparse_quarantined(raw_email_id: int, db: Session = Depends(get_db)):
+    """Re-parse a quarantined email through the updated parser."""
+    import json
+    raw = db.query(RawEmail).filter(RawEmail.id == raw_email_id).first()
+    if not raw:
+        raise HTTPException(status_code=404, detail="Raw email not found")
+
+    # Re-run the parser on the stored raw email
+    parsed = parse_lead_from_email(raw.subject or "", raw.body or "", raw.sender or "", raw.html_body or "")
+    raw.parse_result_json = json.dumps(parsed, default=str)
+
+    phone = parsed.get("phone", "").strip()
+    if not phone:
+        raw.quarantine_reason = "no_phone (re-parsed)"
+        db.commit()
+        return {"status": "still_quarantined", "reason": "no_phone", "parsed": parsed}
+
+    # Phone found — create the lead
+    name = parsed.get("name", "").strip() or "Unknown"
+    lead = Lead(
+        name=name, phone=phone,
+        email=parsed.get("email", ""),
+        source=parsed.get("source", "email"), status="new",
+        budget_min=parsed.get("budget_min"),
+        budget_max=parsed.get("budget_max"),
+        preferred_location=parsed.get("preferred_location", ""),
+        property_type=parsed.get("property_type", ""),
+        configuration=parsed.get("configuration", ""),
+        price=parsed.get("price", ""),
+        notes=parsed.get("notes", "")[:500],
+    )
+    if raw.received_at:
+        lead.created_at = raw.received_at
+    db.add(lead)
+    db.flush()
+    raw.status = "parsed"
+    raw.lead_id = lead.id
+    raw.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+    raw.quarantine_reason = None
+    db.commit()
+    return {"status": "created", "lead_id": lead.id, "name": name, "phone": phone}
+
+
+@app.post("/api/quarantine/reparse-all")
+def reparse_all_quarantined(db: Session = Depends(get_db)):
+    """Re-parse ALL quarantined/error emails through the updated parser."""
+    import json
+    # Reset quarantined entries to pending so the processor picks them up
+    count = db.query(RawEmail).filter(
+        RawEmail.status.in_(["quarantined", "error"])
+    ).update({"status": "pending"}, synchronize_session="fetch")
+    db.commit()
+
+    # Re-run parser on each pending email to update parse_result_json
+    pending = db.query(RawEmail).filter(RawEmail.status == "pending").all()
+    for raw in pending:
+        try:
+            parsed = parse_lead_from_email(raw.subject or "", raw.body or "", raw.sender or "", raw.html_body or "")
+            raw.parse_result_json = json.dumps(parsed, default=str)
+        except Exception as e:
+            print(f"Re-parse error for {raw.id}: {e}")
+    db.commit()
+
+    # Now process them
+    _process_pending_raw_emails(db)
+    return {"reset_count": count, "status": "reprocessed"}
+
+
+@app.post("/api/quarantine/{raw_email_id}/manual")
+def manual_create_from_quarantine(raw_email_id: int, lead_data: LeadCreate, db: Session = Depends(get_db)):
+    """Manually create a lead from a quarantined email with user-supplied data."""
+    raw = db.query(RawEmail).filter(RawEmail.id == raw_email_id).first()
+    if not raw:
+        raise HTTPException(status_code=404, detail="Raw email not found")
+
+    lead = Lead(**lead_data.model_dump())
+    if raw.received_at:
+        lead.created_at = raw.received_at
+    db.add(lead)
+    db.flush()
+    raw.status = "parsed"
+    raw.lead_id = lead.id
+    raw.parsed_at = datetime.datetime.now(datetime.timezone.utc)
+    raw.quarantine_reason = "manually_resolved"
+    db.commit()
+    return {"status": "created", "lead_id": lead.id}
 
 
 # ─── Chat API (WhatsApp Web-style) ────────────────────────────────────
@@ -879,19 +1091,21 @@ def get_chat_messages(lead_id: int, limit: int = 100, db: Session = Depends(get_
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
 
-    messages = (
+    # Get the NEWEST messages (desc), then reverse to chronological for display
+    messages = list(reversed(
         db.query(Message)
         .filter(Message.lead_id == lead_id)
-        .order_by(Message.created_at.asc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(limit)
         .all()
-    )
+    ))
     return {
         "lead_id": lead.id,
         "name": lead.name,
         "phone": lead.phone,
         "status": lead.status,
         "auto_reply_enabled": lead.auto_reply_enabled if lead.auto_reply_enabled is not None else True,
+        "media_sent": lead.media_sent if lead.media_sent is not None else False,
         "messages": [
             {
                 "id": m.id,
@@ -1048,8 +1262,8 @@ def simulate_incoming_message(req: SimulateMessageRequest, db: Session = Depends
     lead.unread_count = (lead.unread_count or 0) + 1
     db.commit()
 
-    # Trigger welcome sequence for first-time leads
-    if not lead.welcome_sent:
+    # Trigger welcome sequence for first-time leads (respects WA Safety Guard)
+    if not lead.welcome_sent and can_send_to(phone_clean):
         import threading
         from welcome_sequence import send_welcome_sequence
 
@@ -1092,6 +1306,18 @@ def toggle_auto_reply(lead_id: int, db: Session = Depends(get_db)):
     return {"lead_id": lead.id, "auto_reply_enabled": lead.auto_reply_enabled}
 
 
+@app.post("/api/chats/{lead_id}/reset-welcome")
+def reset_welcome_sequence(lead_id: int, db: Session = Depends(get_db)):
+    """Reset welcome + media flags so the sequence can be re-sent on next reply."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    lead.welcome_sent = True  # Keep welcome_sent True (template was already sent)
+    lead.media_sent = False   # Reset media flag so next reply triggers the full media sequence
+    db.commit()
+    return {"lead_id": lead.id, "media_sent": False, "message": "Welcome media sequence reset. It will re-send on the next reply."}
+
+
 @app.get("/api/chats/unread-count")
 def get_total_unread(db: Session = Depends(get_db)):
     """Get total unread message count across all leads."""
@@ -1117,6 +1343,10 @@ def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(
     if len(phone) > 10:
         phone = phone[-10:]
 
+    # WA Safety Guard
+    if not can_send_to(phone):
+        return {"status": "error", "error": f"Blocked: Live mode is OFF and {phone} is not in whitelist. Enable live mode on the dashboard to send to all leads."}
+
     if req.re_engage:
         # Send a WhatsApp template to re-open the 24hr conversation window
         from whatsapp import send_whatsapp_template
@@ -1134,33 +1364,32 @@ def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(
         db.commit()
         return {"status": "ok", "message": "Re-engagement template sent"}
     else:
-        # Send full welcome sequence in background
+        # Send welcome template in background
         import threading
         from welcome_sequence import send_welcome_sequence
 
-        def _run(phone_num, lid):
+        def _run(phone_num, lid, lname):
             try:
-                result = send_welcome_sequence(phone_num)
+                result = send_welcome_sequence(phone_num, lead_name=lname)
                 print(f"Force welcome sent to {phone_num}: {result}")
                 wdb = SessionLocal()
                 try:
                     wlead = wdb.query(Lead).filter(Lead.id == lid).first()
                     if wlead:
                         wlead.welcome_sent = True
-                        from welcome_sequence import get_welcome_db_messages
-                        for m in get_welcome_db_messages():
-                            wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
-                                            content=m["content"], status="sent", is_read=True))
+                        template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
+                        wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                        content=f"[Template Sent: {template_name}]", status="sent", is_read=True))
                     wdb.commit()
                 finally:
                     wdb.close()
             except Exception as e:
                 print(f"Force welcome error: {e}")
 
-        thread = threading.Thread(target=_run, args=(phone, lead.id))
+        thread = threading.Thread(target=_run, args=(phone, lead.id, lead.name))
         thread.daemon = True
         thread.start()
-        return {"status": "ok", "message": "Welcome sequence started"}
+        return {"status": "ok", "message": "Welcome template started"}
 
 
 # ─── Knowledge Base API ──────────────────────────────────────────────
@@ -1250,21 +1479,21 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
         lead.unread_count = (lead.unread_count or 0) + 1
         db.commit()
 
-        # Send welcome sequence if this is the first reply (template reply)
-        if not lead.welcome_sent:
+        # Send media sequence directly if this is the first reply from a new lead
+        if not lead.media_sent and can_send_to(phone_clean):
             import threading
-            from welcome_sequence import send_welcome_sequence
+            from welcome_sequence import send_media_sequence, get_welcome_db_messages
 
-            def _run_welcome(phone_num, lead_id):
+            def _run_media(phone_num, lead_id):
                 try:
-                    result = send_welcome_sequence(phone_num)
-                    print(f"Welcome sequence sent to {phone_num}: {result}")
+                    result = send_media_sequence(phone_num)
+                    print(f"Media sequence sent to {phone_num}: {result}")
                     wdb = SessionLocal()
                     try:
                         wlead = wdb.query(Lead).filter(Lead.id == lead_id).first()
                         if wlead:
                             wlead.welcome_sent = True
-                            from welcome_sequence import get_welcome_db_messages
+                            wlead.media_sent = True
                             for m in get_welcome_db_messages():
                                 wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
                                                 content=m["content"], status="sent", is_read=True))
@@ -1272,13 +1501,14 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
                     finally:
                         wdb.close()
                 except Exception as e:
-                    print(f"Welcome sequence error: {e}")
+                    print(f"Media sequence error: {e}")
 
             incoming.is_auto_replied = True
             db.commit()
-            thread = threading.Thread(target=_run_welcome, args=(phone_clean, lead.id))
+            thread = threading.Thread(target=_run_media, args=(phone_clean, lead.id))
             thread.daemon = True
             thread.start()
+            return {"status": "ok"}
 
     return {"status": "ok"}
 

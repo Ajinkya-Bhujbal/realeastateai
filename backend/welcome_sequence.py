@@ -38,41 +38,26 @@ PRE_PHOTO_MESSAGES = [
     ),
     # Message 2: Overview + Amenities + Facilities
     (
-        "A society that is just like a *Five Star Hotel/Resort* "
+        "A society that is just like a Five Star Hotel/Resort "
         "with world class amenities like swimming pool, gym, cricket ground, "
         "badminton court, Basketball Court, Kids Play Area, Pool, Snooker, "
         "Squash, carrom board, Table Tennis, foosball, Golf, "
         "work lounge, reading lounge. 🎱🎾🏏🏀\n\n"
-        "@@  *Super-Market, Mini-Market, Vegetable Market, Hotel, "
-        "Laundry Shop, Medical Shop, Mess, Maid*  inside the society itself "
-        "on walking distance...* @@ 🛒\n\n"
+        "@@ Super-Market, Mini-Market, Vegetable Market, Hotel, "
+        "Laundry Shop, Medical Shop, Mess, Maid inside the society itself "
+        "on walking distance... @@ 🛒\n\n"
         "24 Hrs water.\n"
         "24 Hrs electricity and power backup and generator.\n"
         "24 Hr security.\n"
-        "There will *NO Maintainance* or charges.\n"
-        "# *Free Shuttle/Bus service* # to BAVDHAN City in 10 Minutes 🚐\n"
+        "There will NO Maintainance or charges.\n"
+        "# Free Shuttle/Bus service* # to BAVDHAN City in 10 Minutes 🚐\n"
         "😊"
-    ),
-    # Message 3: Rent + Buy Prices
-    (
-        "*Rent Structure...* 💷\n"
-        "1 bhk rent 16k to 18k\n"
-        "2 bhk rent 21k - 22k\n"
-        "3 bhk compact rent 23k - 25k\n"
-        "3 bhk grande rent 26k to 28k\n\n"
-        "*Deposit will be 2 months rent for unfurnished.*\n\n"
-        "*Buying Prices* 💵\n"
-        "1 bhk 51 Lacks (negotiable)\n"
-        "2 bhk 81 Lacks (negotiable)\n"
-        "3 bhk compact 90 Lacks (negotiable)\n"
-        "3 bhk grande 1 Cr (negotiable)\n\n"
-        "Alternate Number: 7387457889"
     ),
 ]
 
 # Message sent right before amenity photos
 PHOTO_INTRO_MESSAGE = (
-    "Please find below the photos of *Free to use, Lavish Amenities* "
+    "Please find below the photos of Free to use, Lavish Amenities "
     "in the society.\n"
     "(Note: All photos are real. 😊)\n"
     "👇👇👇👇👇👇👇👇"
@@ -80,9 +65,25 @@ PHOTO_INTRO_MESSAGE = (
 
 # Message sent right before flat videos (after 30s wait)
 VIDEO_INTRO_MESSAGE = (
-    "Please find below the *Videos* of available flats for *Sell and Rent* both.\n"
+    "Please find below the Videos of available flats for Sell and Rent both.\n"
     "( 1 / 2 / 2.5 / 3 / 4 BHK available )\n"
     "👇👇👇👇👇👇👇👇"
+)
+
+# Price message sent after videos
+PRICE_MESSAGE = (
+    "Rent Structure... 💷\n"
+    "1 bhk rent 16k to 18k\n"
+    "2 bhk rent 21k - 22k\n"
+    "3 bhk compact rent 23k - 25k\n"
+    "3 bhk grande rent 26k to 28k\n\n"
+    "Deposit will be 2 months rent for unfurnished.\n\n"
+    "Buying Prices 💵\n"
+    "1 bhk 51 Lacks (negotiable)\n"
+    "2 bhk 81 Lacks (negotiable)\n"
+    "3 bhk compact 90 Lacks (negotiable)\n"
+    "3 bhk grande 1 Cr (negotiable)\n\n"
+    "Alternate Number: 7387457889"
 )
 
 # Final message after all media
@@ -92,7 +93,7 @@ FINAL_MESSAGE = (
 )
 
 # Combined list for DB storage (all text messages in order)
-ALL_TEXT_MESSAGES = PRE_PHOTO_MESSAGES + [PHOTO_INTRO_MESSAGE, VIDEO_INTRO_MESSAGE, FINAL_MESSAGE]
+ALL_TEXT_MESSAGES = PRE_PHOTO_MESSAGES + [PHOTO_INTRO_MESSAGE, VIDEO_INTRO_MESSAGE, PRICE_MESSAGE, FINAL_MESSAGE]
 
 
 def get_welcome_db_messages() -> list:
@@ -116,7 +117,9 @@ def get_welcome_db_messages() -> list:
     # 5. All flat videos
     for v in get_flat_videos():
         msgs.append({"content": f"[VIDEO:{os.path.basename(v)}]"})
-    # 6. Final message
+    # 6. Price message
+    msgs.append({"content": PRICE_MESSAGE})
+    # 7. Final message
     msgs.append({"content": FINAL_MESSAGE})
     return msgs
 
@@ -180,9 +183,51 @@ def _send_video(phone: str, video_path: str) -> bool:
     return False
 
 
-def send_welcome_sequence(phone: str) -> dict:
+def send_welcome_sequence(phone: str, lead_name: str = None) -> dict:
     """
-    Send the full welcome sequence to a phone number.
+    OPTION A: Send ONLY the template message (with elevation image if available).
+    This opens the 24-hour conversation window.
+    """
+    from whatsapp import send_whatsapp_template
+    template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
+    
+    # Check if there's an elevation image to use as header
+    header_image_id = None
+    elevation_files = _get_media_files(".", ("jpg", "jpeg", "png", "webp"))
+    elevation_path = next((f for f in elevation_files if "elevation" in os.path.basename(f).lower()), None)
+    
+    if elevation_path:
+        try:
+            with open(elevation_path, "rb") as f:
+                file_bytes = f.read()
+            filename = os.path.basename(elevation_path)
+            ext = filename.rsplit(".", 1)[-1].lower()
+            mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+            header_image_id = upload_whatsapp_media(file_bytes, mime, filename)
+        except Exception as e:
+            print(f"[Welcome] Error uploading elevation image: {e}")
+
+    body_params = [lead_name.split()[0]] if lead_name and lead_name.lower() != "unknown" else []
+    
+    result = send_whatsapp_template(
+        to_phone=phone,
+        template_name=template_name,
+        header_image_id=header_image_id,
+        body_params=body_params
+    )
+    
+    if result.get("success"):
+        print(f"[Welcome] Template '{template_name}' sent to {phone}")
+    else:
+        print(f"[Welcome] Template error for {phone}: {result}")
+        
+    return result
+
+
+def send_media_sequence(phone: str) -> dict:
+    """
+    OPTION A (Part 2): Send the full media sequence to a phone number.
+    This is triggered AFTER the user replies to the template message.
     Follows the exact flow with proper timing:
       1) Text msgs → 2) Photo intro → 3) ALL photos →
       4) Wait 30s → 5) Video intro → 6) ALL videos →
@@ -216,11 +261,11 @@ def send_welcome_sequence(phone: str) -> dict:
                 results["errors"].append(f"Photo failed: {os.path.basename(photo_path)}")
             time.sleep(1)  # 1s between photos
     except AuthenticationError:
-        print(f"[Welcome] Aborting sequence for {phone} due to Authentication Error.")
+        print(f"[MediaSeq] Aborting sequence for {phone} due to Authentication Error.")
         results["errors"].append("Authentication failed")
         return results
 
-    print(f"[Welcome] {len(photos)} photos sent to {phone}. Waiting 30s before videos...")
+    print(f"[MediaSeq] {len(photos)} photos sent to {phone}. Waiting 30s before videos...")
 
     # ── Step 4: Wait 30 seconds ──
     time.sleep(30)
@@ -241,18 +286,23 @@ def send_welcome_sequence(phone: str) -> dict:
                     results["errors"].append(f"Video failed: {os.path.basename(video_path)}")
                 time.sleep(5)  # 5s between videos (larger files)
         except AuthenticationError:
-            print(f"[Welcome] Aborting video sequence for {phone} due to Authentication Error.")
+            print(f"[MediaSeq] Aborting video sequence for {phone} due to Authentication Error.")
             results["errors"].append("Authentication failed during videos")
             return results
 
-        print(f"[Welcome] {len(videos)} videos sent to {phone}. Waiting 60s before final msg...")
+        print(f"[MediaSeq] {len(videos)} videos sent to {phone}. Waiting 60s before final msg...")
 
         # ── Step 7: Wait 60 seconds ──
         time.sleep(60)
 
-    # ── Step 8: Send final message ──
+    # ── Step 8: Send price message ──
+    send_whatsapp_message(phone, PRICE_MESSAGE)
+    results["texts"] += 1
+    time.sleep(2)
+
+    # ── Step 9: Send final message ──
     send_whatsapp_message(phone, FINAL_MESSAGE)
     results["texts"] += 1
 
-    print(f"[Welcome] Sequence complete for {phone}: {results}")
+    print(f"[MediaSeq] Sequence complete for {phone}: {results}")
     return results

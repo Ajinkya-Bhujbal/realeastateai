@@ -13,6 +13,46 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
 
 
+def _truncate_reply(text: str, max_sentences: int = 2) -> str:
+    """Hard-cap AI output to max_sentences. LLMs often ignore length constraints."""
+    import re
+    if not text:
+        return text
+    # Split on sentence-ending punctuation followed by space or end
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    truncated = ' '.join(sentences[:max_sentences]).strip()
+    # Ensure it ends with punctuation
+    if truncated and truncated[-1] not in '.!?':
+        truncated += '.'
+    return _scrub_brokerage(truncated)
+
+
+def _scrub_brokerage(text: str) -> str:
+    """Remove any mention of brokerage/commission/GST from AI output.
+    The AI should NEVER proactively mention these — only when explicitly asked."""
+    import re
+    if not text:
+        return text
+    # Remove sentences/clauses that mention brokerage, commission, or GST
+    # Pattern: match "with no brokerage...", "no brokerage...", "without brokerage..."
+    patterns = [
+        r'\s*[,.]?\s*with\s+no\s+brokerage[^.!?]*[.!?]?',
+        r'\s*[,.]?\s*no\s+brokerage[^.!?]*[.!?]?',
+        r'\s*[,.]?\s*without\s+(any\s+)?brokerage[^.!?]*[.!?]?',
+        r'\s*[,.]?\s*zero\s+brokerage[^.!?]*[.!?]?',
+        r'\s*[,.]?\s*brokerage[\s-]?free[^.!?]*[.!?]?',
+    ]
+    for p in patterns:
+        text = re.sub(p, '', text, flags=re.IGNORECASE)
+    # Also remove any standalone mention of "brokerage" or "GST" in a clause
+    # e.g. "...with no brokerage or GST fees involved"
+    text = re.sub(r'\s*,?\s*(?:with\s+)?no\s+(?:brokerage|commission|GST)[^.!?]*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if text and text[-1] not in '.!?':
+        text += '.'
+    return text
+
+
 def check_ollama() -> bool:
     """Check if Ollama is running."""
     try:
@@ -63,27 +103,25 @@ def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300, tem
 
 
 def generate_lead_reply(lead_name: str, property_interest: str, context: str = "") -> str:
-    """Generate a WhatsApp reply for a new lead."""
-    prompt = f"""You are a friendly Indian real estate agent. Write a short WhatsApp reply (2-3 lines max) to a new lead.
-
-Lead: {lead_name}
+    """Generate a warm, engaging WhatsApp reply for a new lead."""
+    prompt = f"""You are a helpful real estate assistant at Vanaha Township, Bavdhan. 
+Write a warm WhatsApp reply (1-2 sentences ONLY) to: {lead_name}.
 Interest: {property_interest}
-{f'Context: {context}' if context else ''}
-
-Reply (be warm, professional, mention you will share options):"""
-    return generate(prompt, max_tokens=150)
+Rules: Answer directly if info is known, then ask "Aap visit kab plan kar rahe ho?" or "Should I share photos?".
+Reply:"""
+    return _truncate_reply(generate(prompt, max_tokens=60))
 
 
 def generate_followup_message(lead_name: str, interaction_count: int, last_message: str = "") -> str:
     """Generate a follow-up WhatsApp message."""
-    prompt = f"""Write a short WhatsApp follow-up message (2-3 lines max) for a real estate lead.
+    prompt = f"""Write a SHORT WhatsApp follow-up message (1-2 sentences ONLY) for a real estate lead.
 
 Lead: {lead_name}
 Follow-up #{interaction_count}
 {f'Last msg: {last_message[:100]}' if last_message else ''}
 
-Keep it friendly and brief. Ask if they need help or want to schedule a visit:"""
-    return generate(prompt, max_tokens=120)
+Keep it very brief. Ask if they need help or want to visit:"""
+    return _truncate_reply(generate(prompt, max_tokens=60))
 
 
 def generate_property_recommendation(lead_name: str, preferences: str, properties: list) -> str:
@@ -105,15 +143,13 @@ Write a friendly WhatsApp message recommending these properties:"""
 
 
 def generate_auto_reply(incoming_message: str, lead_name: str, lead_context: str = "") -> str:
-    """Generate an auto-reply for an incoming WhatsApp message."""
-    prompt = f"""You are a real estate agent's AI assistant. Reply to this WhatsApp message in 2-3 lines.
-
+    """Generate a quick, relevant auto-reply."""
+    prompt = f"""You are a real estate assistant. Reply to: {incoming_message}
 From: {lead_name}
-Message: {incoming_message[:200]}
-{f'Context: {lead_context[:200]}' if lead_context else ''}
-
-Reply (be helpful, professional, brief):"""
-    return generate(prompt, max_tokens=150)
+Context: {lead_context}
+Rules: 1-2 sentences ONLY. Answer the question directly then ask "Aap kab visit karenge?" or "Should I share layout videos?". No introductions.
+Reply:"""
+    return _truncate_reply(generate(prompt, max_tokens=60))
 
 
 def _load_full_knowledge_base() -> str:
@@ -142,46 +178,54 @@ def generate_rag_reply(
 ) -> str:
     """
     Generate an AI reply using the FULL knowledge base injected into the prompt.
-    Supports Hinglish/Marathi detection and uses last 20 messages for context.
+    Supports Hinglish/Marathi detection and uses last 10 messages for context.
     """
     # Load the FULL knowledge base (small file, ~7KB — fits easily)
     full_kb = _load_full_knowledge_base()
 
-    # Build recent conversation history (last 20 messages for context)
+    # Build recent conversation history — skip welcome sequence messages to keep context clean
     history_text = ""
     if conversation_history:
-        recent = conversation_history[-20:]
+        # Filter out welcome sequence / media messages to keep context focused
+        filtered = []
+        for m in conversation_history:
+            content = m.get("content", "")
+            # Skip welcome sequence texts, media refs, and very long messages (bulk texts)
+            if not content:
+                continue
+            if content.startswith("[IMAGE:") or content.startswith("[VIDEO:"):
+                continue
+            if len(content) > 200:  # Welcome texts are long — skip them
+                continue
+            if any(skip in content for skip in ["Please wait and don't reply", "Please find below the photos", "Please find below the Videos", "Rent Structure", "Buying Prices"]):
+                continue
+            filtered.append(m)
+        recent = filtered[-10:]  # Last 10 clean messages only
         lines = []
         for m in recent:
             role = "Customer" if m.get("direction") == "in" else "You"
-            lines.append(f"{role}: {m.get('content', '')[:250]}")
+            lines.append(f"{role}: {m.get('content', '')[:150]}")
         history_text = "\n".join(lines)
 
-    prompt = f"""You are a WhatsApp sales agent for Armstrong Properties — the biggest property broker at Shapoorji Pallonji Vanaha Township, Bavdhan, Pune. Phase 1 is called Yahavi.
+    prompt = f"""You are a WhatsApp real estate assistant at Vanaha Township, Bavdhan, Pune.
 
-=== COMPANY KNOWLEDGE BASE ===
-{full_kb[:5500]}
-=== END ===
+PRICES:
+RENT: 1BHK=16k-18k, 2BHK=21k-22k, 3BHK Compact=23k-25k, 3BHK Grande=26k-28k
+BUY: 1BHK=51L, 2BHK=81L, 3BHK Compact=90L, 3BHK Grande=1Cr
+Deposit=2 months rent. Location=12 min from Chellaram Hospital, Bavdhan Highway.
 
-RULES:
-1. Use ONLY facts from the knowledge base above. Never invent prices, places, or details.
-2. If the customer writes in Hinglish (Hindi written in English) or Marathi written in English, reply in Hinglish.
-3. If the customer writes in English, reply in English.
-4. Keep replies SHORT — maximum 2-3 sentences. No long paragraphs.
-5. Give EXACT numbers: rent = 16k-28k, buy = 51L-1Cr, deposit = 2 months.
-6. If info is not in KB, say: "Ek min, team se check karke batata hu."
-7. Never add disclaimers, notes, or meta-commentary.
-8. Be warm, friendly, and direct — like a real broker on WhatsApp.
+FACTS:
+{full_kb[:3500]}
 
-{f'CONVERSATION SO FAR:' if history_text else ''}
+INSTRUCTIONS: Reply in 1-2 SHORT sentences. If customer asks about RENT give rent price. If customer asks about BUYING/PURCHASE give buy price. End with a question. No introductions. Use Hinglish naturally.
+
+{f'Recent chat:' if history_text else ''}
 {history_text}
 
-Customer: {lead_name}
-{f'Preferences: {lead_context}' if lead_context else ''}
-Latest message: {incoming_message[:300]}
-
-Your reply:"""
-    return generate(prompt, max_tokens=200, temperature=0.1)
+Customer: {incoming_message[:200]}
+Reply:"""
+    reply = generate(prompt, max_tokens=80, temperature=0.3)
+    return _truncate_reply(reply)
 
 
 def summarize_lead(lead_data: dict) -> str:

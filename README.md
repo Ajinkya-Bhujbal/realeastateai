@@ -143,6 +143,7 @@ real-estate-leads/
 | **File** | `backend/welcome_sequence.py` |
 | **Trigger** | First incoming message from a lead (checked in `followup.py::process_unread_messages`) |
 | **Flow** | Text greeting → Amenity overview → Pricing → Photo intro → **ALL 24 photos** (1s gap) → Wait 30s → Video intro → **ALL 5 videos** (5s gap) → Wait 60s → Final contact message |
+| **Re-trigger** | Can be manually queued for re-sending via the "Re-send Welcome" button in the chat header UI |
 | **DB Tokens** | Photos stored as `[IMAGE:filename]`, Videos as `[VIDEO:filename]` |
 | **Media Folders** | `data/media/amenities/` (photos), `data/media/flats/` (videos) |
 
@@ -162,6 +163,7 @@ real-estate-leads/
 | **File** | `backend/followup.py::_send_media_on_request()` |
 | **Trigger keywords** | `photo`, `video`, `pic`, `picture`, `1bhk`, `2bhk`, `furnished`, `sample flat`, `layout`, `amenity`, etc. |
 | **Behavior** | Sends disclaimer ("These are videos of sample flat layout...") → ALL amenity photos → ALL flat videos |
+| **AI Captions**| Uses Ollama to generate short, enthusiastic, emoji-rich captions for each media file based on its filename |
 | **Important** | System sends ALL media regardless of specific flat type asked — because layout is the same for all |
 
 ### 6. Location Sequence
@@ -222,6 +224,7 @@ FollowUpSchedule (followup_schedules)
 | `POST` | `/api/chats/{lead_id}/send-media` | Send media (file upload) |
 | `POST` | `/api/chats/{lead_id}/read` | Mark messages as read |
 | `POST` | `/api/chats/{lead_id}/toggle-auto-reply` | Toggle AI auto-reply |
+| `POST` | `/api/chats/{lead_id}/reset-welcome` | Reset `media_sent` flag to re-send welcome sequence |
 | `POST` | `/api/chats/simulate-incoming` | Simulate incoming message (testing) |
 | `POST` | `/api/parse-email/save` | Parse + save a single email |
 | `GET/POST` | `/api/properties` | List / create properties |
