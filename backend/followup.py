@@ -163,37 +163,17 @@ def process_unread_messages():
                     db.commit()
                     continue
 
-                # ── MEDIA SEQUENCE for leads replying to welcome template ──
+                # ── MEDIA SEQUENCE: DISABLED AUTO-TRIGGER ──
+                # Media (photos/videos) is now ONLY sent when:
+                # 1. User explicitly asks for photos/videos (handled by wants_media below)
+                # 2. Admin manually triggers it via the UI reset-welcome button
+                # Auto-sending media on first reply was causing issues:
+                # user asks a question → gets media dump instead of an answer.
                 if lead.welcome_sent and not lead.media_sent:
-                    import threading
-                    from welcome_sequence import send_media_sequence, get_welcome_db_messages
-                    
-                    # Mark as sent immediately to prevent re-triggering
+                    # Just mark media_sent=True to prevent future auto-triggers
+                    # but do NOT send the media sequence — let the AI answer instead
                     lead.media_sent = True
-                    for m in msgs:
-                        m.is_auto_replied = True
-                        m.processing_lock_at = None
                     db.commit()
-
-                    def _run_media(phone_num, lead_id_inner):
-                        try:
-                            result = send_media_sequence(phone_num)
-                            print(f"[Followup] Media sequence sent to {phone_num}: {result}")
-                            wdb = SessionLocal()
-                            try:
-                                for m in get_welcome_db_messages():
-                                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
-                                                    content=m["content"], status="sent", is_read=True))
-                                wdb.commit()
-                            finally:
-                                wdb.close()
-                        except Exception as e:
-                            print(f"[Followup] Media sequence error: {e}")
-
-                    thread = threading.Thread(target=_run_media, args=(lead.phone, lead.id))
-                    thread.daemon = True
-                    thread.start()
-                    continue  # Media sequence handles the first reply — skip AI reply
 
                 # ── Combine ALL pending messages for intent detection + AI context ──
                 combined_msg_text = "\n".join(m.content for m in msgs if m.content)
@@ -247,12 +227,172 @@ def process_unread_messages():
                 # ── LOCATION SEQUENCE ──
                 if wants_location:
                     _send_location_sequence(lead, db)
-                    # Mark all as replied and skip AI reply — location sequence already answers
+                    # Only mark messages that contain location keywords as replied
+                    # Leave other messages (e.g. "what is the rent?") for the AI
+                    location_kws = ['location', 'address', 'kaha', 'kahan', 'where', 'kidhar',
+                                    'pune me kaha', 'location kya', 'jagah', 'route', 'direction',
+                                    'kaise aaye', 'kaise aana', 'how to reach', 'come']
+                    has_non_location = False
                     for m in msgs:
-                        m.is_auto_replied = True
+                        m_lower = (m.content or '').lower()
+                        if any(kw in m_lower for kw in location_kws):
+                            m.is_auto_replied = True
+                        else:
+                            has_non_location = True
                         m.processing_lock_at = None
                     db.commit()
-                    continue
+                    if not has_non_location:
+                        continue  # All messages were location — skip AI
+                    # else: fall through to AI reply for remaining messages
+
+                # ── MEDIA SEQUENCE (user explicitly asked for photos/videos) ──
+                if wants_media:
+                    import threading
+
+                    def _run_media_sequence(phone_num, lead_id_inner, lead_name_inner):
+                        """Send photos + videos in the exact sequence, then check for new messages."""
+                        import time as _time
+                        from welcome_sequence import get_amenity_photos, get_flat_videos
+                        from whatsapp import upload_whatsapp_media as _upload, send_whatsapp_message
+                        wdb = SessionLocal()
+                        try:
+                            # ── Step 1: Photo intro message ──
+                            photo_intro = (
+                                "Please find below the photos of Free to use, Lavish Amenities in the society.\n"
+                                "(Note: All photos are real. \U0001f60a)\n"
+                                "\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447"
+                            )
+                            send_whatsapp_message(phone_num, photo_intro)
+                            wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                           content=photo_intro, status="sent", is_read=True))
+                            wdb.commit()
+
+                            # ── Step 2: Send ALL amenity photos (2s between each) ──
+                            photos = get_amenity_photos()
+                            for photo_path in photos:
+                                try:
+                                    fname = os.path.basename(photo_path)
+                                    with open(photo_path, "rb") as f:
+                                        file_bytes = f.read()
+                                    ext = fname.rsplit(".", 1)[-1].lower()
+                                    mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                                    media_id = _upload(file_bytes, mime, fname)
+                                    if media_id:
+                                        send_whatsapp_message(phone_num, message=fname, media_id=media_id, media_type="image")
+                                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                                   content=f"[IMAGE:{fname}]", status="sent", is_read=True))
+                                    wdb.commit()
+                                    _time.sleep(2)
+                                except Exception as pe:
+                                    try:
+                                        print(f"Photo send error: {str(pe).encode('ascii','replace').decode()}")
+                                    except Exception:
+                                        pass
+
+                            # ── Step 3: Wait 30 seconds after photos ──
+                            _time.sleep(30)
+
+                            # ── Step 4: Video intro message ──
+                            video_intro = (
+                                "Please find below the Videos of available flats for Sell and Rent both.\n"
+                                "( 1 / 2 / 2.5 / 3 / 4 BHK available )\n"
+                                "\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447"
+                            )
+                            send_whatsapp_message(phone_num, video_intro)
+                            wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                           content=video_intro, status="sent", is_read=True))
+                            wdb.commit()
+
+                            # ── Step 5: Send ALL flat videos (5s between each) ──
+                            videos = get_flat_videos()
+                            for video_path in videos:
+                                try:
+                                    fname = os.path.basename(video_path)
+                                    with open(video_path, "rb") as f:
+                                        file_bytes = f.read()
+                                    media_id = _upload(file_bytes, "video/mp4", fname)
+                                    if media_id:
+                                        send_whatsapp_message(phone_num, message=fname, media_id=media_id, media_type="video")
+                                    wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                                   content=f"[VIDEO:{fname}]", status="sent", is_read=True))
+                                    wdb.commit()
+                                    _time.sleep(5)
+                                except Exception as ve:
+                                    try:
+                                        print(f"Video send error: {str(ve).encode('ascii','replace').decode()}")
+                                    except Exception:
+                                        pass
+
+                            # ── Step 6: Wait 30 seconds after videos ──
+                            _time.sleep(30)
+
+                            try:
+                                print(f"[MediaRequest] Sent to {phone_num}: {len(photos)} photos, {len(videos)} videos")
+                            except Exception:
+                                pass
+
+                            # ── Step 7: Check for unread messages that arrived during media sending ──
+                            _time.sleep(5)
+                            new_msgs = (
+                                wdb.query(Message)
+                                .filter(
+                                    Message.lead_id == lead_id_inner,
+                                    Message.direction == "in",
+                                    Message.is_auto_replied == False,
+                                )
+                                .order_by(Message.created_at)
+                                .all()
+                            )
+                            if new_msgs:
+                                combined = "\n".join(m.content for m in new_msgs if m.content)
+                                if combined.strip():
+                                    # Get conversation history
+                                    recent = (
+                                        wdb.query(Message)
+                                        .filter(Message.lead_id == lead_id_inner)
+                                        .order_by(Message.created_at.desc())
+                                        .limit(15)
+                                        .all()
+                                    )
+                                    conv_history = [
+                                        {"direction": m.direction, "content": m.content}
+                                        for m in reversed(recent)
+                                        if m.content and not m.content.startswith("[IMAGE:") and not m.content.startswith("[VIDEO:")
+                                    ]
+                                    kb_ctx = search_kb(combined, n_results=4)
+                                    reply = generate_rag_reply(
+                                        incoming_message=combined,
+                                        lead_name=lead_name_inner,
+                                        kb_results=kb_ctx,
+                                        conversation_history=conv_history,
+                                    )
+                                    if reply and not reply.startswith("["):
+                                        send_whatsapp_message(phone_num, reply)
+                                        wdb.add(Message(lead_id=lead_id_inner, direction="out", channel="whatsapp",
+                                                       content=reply, status="sent", is_read=True))
+                                    for m in new_msgs:
+                                        m.is_auto_replied = True
+                                    wdb.commit()
+                                    try:
+                                        print(f"[MediaRequest] Post-media AI reply to {lead_name_inner}: {reply[:60].encode('ascii','replace').decode()}...")
+                                    except Exception:
+                                        pass
+
+                        except Exception as me:
+                            try:
+                                print(f"Media sending error: {str(me).encode('ascii','replace').decode()}")
+                            except Exception:
+                                pass
+                        finally:
+                            wdb.close()
+
+                    thread = threading.Thread(
+                        target=_run_media_sequence,
+                        args=(lead.phone, lead.id, lead.name)
+                    )
+                    thread.daemon = True
+                    thread.start()
+                    # Do NOT continue here. Let the AI generate a reply for the text part of the message.
 
                 # ── Generate AI reply addressing ALL pending messages ──
                 # If multiple messages, tell AI about all of them
@@ -288,10 +428,6 @@ def process_unread_messages():
                         is_read=True,
                     )
                     db.add(outgoing)
-
-                    # If user asked for media, send photos and videos
-                    if wants_media:
-                        _send_media_on_request(lead, db)
 
                     # Update lead
                     lead.last_message_at = datetime.datetime.now(datetime.timezone.utc)
