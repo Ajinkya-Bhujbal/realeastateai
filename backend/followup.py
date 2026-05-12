@@ -170,6 +170,35 @@ def process_unread_messages():
                     db.commit()
                     continue
 
+                # ── TRIGGER MEDIA SEQUENCE ON FIRST REPLY ──
+                if lead.status == "new" and lead.welcome_sent:
+                    # User replied for the first time after template was sent!
+                    # Trigger the welcome media sequence.
+                    lead.status = "welcoming"
+                    for m in msgs:
+                        m.is_auto_replied = True # don't send AI reply for this first message, since they get a huge sequence
+                        m.processing_lock_at = None
+                    db.commit()
+
+                    import threading
+                    def _run_welcome_media_seq(phone_num, lead_id_inner):
+                        from welcome_sequence import send_media_sequence
+                        from db import SessionLocal
+                        from models import Lead
+                        send_media_sequence(phone_num, lead_id=lead_id_inner)
+                        wdb = SessionLocal()
+                        try:
+                            l = wdb.query(Lead).filter(Lead.id == lead_id_inner).first()
+                            if l:
+                                l.status = "contacted"
+                            wdb.commit()
+                        finally:
+                            wdb.close()
+
+                    t = threading.Thread(target=_run_welcome_media_seq, args=(lead.phone, lead.id))
+                    t.daemon = True
+                    t.start()
+                    continue
 
 
                 # ── Combine ALL pending messages for intent detection + AI context ──
@@ -396,13 +425,40 @@ def process_unread_messages():
                     # Do NOT continue here. Let the AI generate a reply for the text part of the message.
 
                 # ── Generate AI reply addressing ALL pending messages ──
-                # If multiple messages, tell AI about all of them
+                # Use the clean_text (which has [IMAGE:...] removed) and remove WhatsApp fallback captions
+                ai_text = clean_text
+                for fb in ['[image message]', '[video message]', '[document message]', '[audio message]', '[sticker message]', '[unknown message]']:
+                    ai_text = ai_text.replace(fb, '')
+                ai_text = ai_text.strip()
+
+                if not ai_text:
+                    # User only sent media/documents without any meaningful text caption.
+                    # Do not generate an AI reply. Just mark them as processed.
+                    for m in msgs:
+                        m.is_auto_replied = True
+                        m.processing_lock_at = None
+                    db.commit()
+                    continue
+
                 if len(msgs) == 1:
-                    ai_input = msgs[0].content
+                    ai_input = ai_text
                 else:
-                    ai_input = "Customer sent multiple messages:\n" + "\n".join(
-                        f"- {m.content}" for m in msgs if m.content
-                    ) + "\n\nRespond to ALL of the above messages in one reply. Address every point — whether it is a question, request, or statement."
+                    # Collect only messages that have text after stripping media
+                    text_msgs = []
+                    for m in msgs:
+                        if m.content:
+                            txt = re.sub(r'\[(?:image|video|audio|document|IMAGE|VIDEO|DOCUMENT|MEDIA|FAILED_MEDIA)[^\]]*\]', '', m.content, flags=re.IGNORECASE)
+                            for fb in ['[image message]', '[video message]', '[document message]', '[audio message]', '[sticker message]', '[unknown message]']:
+                                txt = txt.replace(fb, '')
+                            if txt.strip():
+                                text_msgs.append(txt.strip())
+                    
+                    if len(text_msgs) == 1:
+                        ai_input = text_msgs[0]
+                    else:
+                        ai_input = "Customer sent multiple messages:\n" + "\n".join(
+                            f"- {txt}" for txt in text_msgs
+                        ) + "\n\nRespond to ALL of the above messages in one reply. Address every point — whether it is a question, request, or statement."
 
                 # 1. Search KB for relevant context (actual RAG)
                 kb_context = search_kb(ai_input, n_results=4)

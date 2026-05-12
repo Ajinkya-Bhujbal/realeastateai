@@ -243,7 +243,7 @@ def send_welcome_sequence(phone: str, lead_name: str = None) -> dict:
     return result
 
 
-def send_media_sequence(phone: str) -> dict:
+def send_media_sequence(phone: str, lead_id: int = None) -> dict:
     """
     OPTION A (Part 2): Send the full media sequence to a phone number.
     This is triggered AFTER the user replies to the template message.
@@ -255,17 +255,32 @@ def send_media_sequence(phone: str) -> dict:
     """
     results = {"texts": 0, "photos": 0, "videos": 0, "errors": []}
 
+    # ── DB Helper ──
+    from db import SessionLocal
+    from models import Message
+    
+    def _log_msg(content: str):
+        if not lead_id: return
+        db_session = SessionLocal()
+        try:
+            db_session.add(Message(lead_id=lead_id, direction="out", channel="whatsapp", content=content, status="sent", is_read=True))
+            db_session.commit()
+        finally:
+            db_session.close()
+
     # ── Step 1: Send pre-photo text messages ──
     for msg_text in PRE_PHOTO_MESSAGES:
         result = send_whatsapp_message(phone, msg_text)
         if result.get("success") or result.get("mock"):
             results["texts"] += 1
+            _log_msg(msg_text)
         else:
             results["errors"].append(f"Text failed: {result.get('error', 'unknown')}")
         time.sleep(2)  # 2s gap between text messages
 
     # ── Step 2: Send photo intro message ──
     send_whatsapp_message(phone, PHOTO_INTRO_MESSAGE)
+    _log_msg(PHOTO_INTRO_MESSAGE)
     results["texts"] += 1
     time.sleep(1)
 
@@ -276,6 +291,7 @@ def send_media_sequence(phone: str) -> dict:
         for photo_path in photos:
             if _send_photo(phone, photo_path):
                 results["photos"] += 1
+                _log_msg(f"[IMAGE:{os.path.basename(photo_path)}]")
             else:
                 results["errors"].append(f"Photo failed: {os.path.basename(photo_path)}")
             time.sleep(1)  # 1s between photos
@@ -293,6 +309,7 @@ def send_media_sequence(phone: str) -> dict:
     videos = get_flat_videos()
     if videos:
         send_whatsapp_message(phone, VIDEO_INTRO_MESSAGE)
+        _log_msg(VIDEO_INTRO_MESSAGE)
         results["texts"] += 1
         time.sleep(1)
 
@@ -301,6 +318,7 @@ def send_media_sequence(phone: str) -> dict:
             for video_path in videos:
                 if _send_video(phone, video_path):
                     results["videos"] += 1
+                    _log_msg(f"[VIDEO:{os.path.basename(video_path)}]")
                 else:
                     results["errors"].append(f"Video failed: {os.path.basename(video_path)}")
                 time.sleep(5)  # 5s between videos (larger files)
@@ -316,11 +334,13 @@ def send_media_sequence(phone: str) -> dict:
 
     # ── Step 8: Send price message ──
     send_whatsapp_message(phone, PRICE_MESSAGE)
+    _log_msg(PRICE_MESSAGE)
     results["texts"] += 1
     time.sleep(2)
 
     # ── Step 9: Send final message ──
     send_whatsapp_message(phone, FINAL_MESSAGE)
+    _log_msg(FINAL_MESSAGE)
     results["texts"] += 1
 
     print(f"[MediaSeq] Sequence complete for {phone}: {results}")
