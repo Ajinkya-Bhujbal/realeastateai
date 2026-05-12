@@ -39,9 +39,10 @@ function renderMsgContent(content) {
     if (!content) return '';
 
     // [IMAGE:filename] → render as thumbnail
-    const imgMatch = content.match(/^\[IMAGE:(.+?)\]$/);
+    const imgMatch = content.match(/^\[IMAGE:(.+?)\](?: (.*))?$/);
     if (imgMatch) {
         const fname = imgMatch[1];
+        const caption = imgMatch[2] ? `<div class="wa-media-label" style="margin-top:4px;">${esc(imgMatch[2])}</div>` : '';
         // Determine subfolder: amenity or flat
         const isAmenity = fname.toLowerCase().includes('amenity') || fname.toLowerCase().includes('pool')
             || fname.toLowerCase().includes('gym') || fname.toLowerCase().includes('lounge')
@@ -52,18 +53,39 @@ function renderMsgContent(content) {
         const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/${folder}/${fname}`;
         return `<div class="wa-media-img" onclick='openMediaViewer(["[IMAGE:${fname}]"], 0)'>
             <img src="${src}" alt="${esc(fname)}" loading="lazy" />
+            ${caption}
         </div>`;
     }
 
     // [VIDEO:filename] → render as video player
-    const vidMatch = content.match(/^\[VIDEO:(.+?)\]$/);
+    const vidMatch = content.match(/^\[VIDEO:(.+?)\](?: (.*))?$/);
     if (vidMatch) {
         const fname = vidMatch[1];
+        const caption = vidMatch[2] ? `<div class="wa-media-label" style="margin-top:4px;">${esc(vidMatch[2])}</div>` : '';
         const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/flats/${fname}`;
-        return `<div class="wa-media-vid" onclick='openMediaViewer(["[VIDEO:${fname}]"], 0)'>
+        return `<div class="wa-media-vid" onclick='openMediaViewer(["[VIDEO:${fname}]"], 0)' style="position:relative; cursor:pointer;">
             <video src="${src}" preload="metadata" style="max-width:100%;border-radius:8px;"></video>
-            <div class="wa-media-label">🎬 ${esc(fname)} (Click to play big)</div>
+            <div style="position:absolute; top:40%; left:50%; transform:translate(-50%, -50%); background:rgba(0,0,0,0.6); color:#fff; font-size:30px; width:50px; height:50px; border-radius:50%; display:flex; align-items:center; justify-content:center; pointer-events:none;">▶</div>
+            ${caption ? caption : `<div class="wa-media-label">🎬 ${esc(fname)}</div>`}
         </div>`;
+    }
+
+    // [DOCUMENT:filename] → render as download link
+    const docMatch = content.match(/^\[DOCUMENT:(.+?)\](?: (.*))?$/);
+    if (docMatch) {
+        const fname = docMatch[1];
+        const caption = docMatch[2] ? `<br><small>${esc(docMatch[2])}</small>` : '';
+        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/${fname}`;
+        return `<div class="wa-media-doc" style="padding: 10px; background: rgba(255,255,255,0.05); border-radius: 6px; border: 1px solid rgba(255,255,255,0.1);">
+            📄 <a href="${src}" target="_blank" download style="color:#53bdeb; text-decoration:none; font-weight:bold;">${esc(fname.replace('incoming/',''))}</a>
+            ${caption}
+        </div>`;
+    }
+
+    // [MEDIA:id] fallback
+    const mediaMatch = content.match(/^\[MEDIA:(.+?)\](.*)$/);
+    if (mediaMatch) {
+        return `<div style="font-style:italic;color:#888;">⏳ Downloading Media...</div>` + esc(mediaMatch[2] || '');
     }
 
     // Regular text: escape, linkify URLs, and preserve newlines
@@ -623,8 +645,8 @@ window.selectChat = async function (leadId) {
                 html += `<div class="wa-msg-bubble ${m.direction} wa-media-gallery-bubble">`;
                 html += `<div class="wa-media-gallery" data-media-group="${groupKey}">`;
                 mediaGroup.forEach((mc, idx) => {
-                    const imgMatch = mc.content.match(/^\[IMAGE:(.+?)\]$/);
-                    const vidMatch = mc.content.match(/^\[VIDEO:(.+?)\]$/);
+                    const imgMatch = mc.content.match(/^\[IMAGE:(.+?)\](?: (.*))?$/);
+                    const vidMatch = mc.content.match(/^\[VIDEO:(.+?)\](?: (.*))?$/);
                     if (imgMatch) {
                         const fname = imgMatch[1];
                         const fl = fname.toLowerCase();
@@ -1050,7 +1072,7 @@ setInterval(() => {
 
 // ─── Media Viewer (Lightbox) ────────────────────
 function _getMediaSrc(content) {
-    const imgMatch = content.match(/^\[IMAGE:(.+?)\]$/);
+    const imgMatch = content.match(/^\[IMAGE:(.+?)\](?: (.*))?$/);
     if (imgMatch) {
         const fname = imgMatch[1];
         const fl = fname.toLowerCase();
@@ -1058,11 +1080,15 @@ function _getMediaSrc(content) {
             || fl.includes('lounge') || fl.includes('ground') || fl.includes('kids')
             || fl.includes('indoor') || fl.includes('yoga') || fl.includes('reading')
             || fl.includes('work') || fl.includes('multipurpose');
-        return { type: 'image', src: `/media/${isAmenity ? 'amenities' : 'flats'}/${fname}`, name: fname };
+        const folder = isAmenity ? 'amenities' : 'flats';
+        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/${folder}/${fname}`;
+        return { type: 'image', src: src, name: fname };
     }
-    const vidMatch = content.match(/^\[VIDEO:(.+?)\]$/);
+    const vidMatch = content.match(/^\[VIDEO:(.+?)\](?: (.*))?$/);
     if (vidMatch) {
-        return { type: 'video', src: `/media/flats/${vidMatch[1]}`, name: vidMatch[1] };
+        const fname = vidMatch[1];
+        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/flats/${fname}`;
+        return { type: 'video', src: src, name: fname };
     }
     return null;
 }
@@ -1079,6 +1105,7 @@ function openMediaViewer(mediaContents, startIdx) {
         <div class="mv-backdrop" onclick="document.getElementById('media-viewer').remove()"></div>
         <div class="mv-content">
             <button class="mv-close" onclick="document.getElementById('media-viewer').remove()">&times;</button>
+            <a id="mv-download" class="mv-download" href="#" download>Download</a>
             <button class="mv-prev" onclick="mvNav(-1)">‹</button>
             <div class="mv-display" id="mv-display"></div>
             <button class="mv-next" onclick="mvNav(1)">›</button>
@@ -1089,12 +1116,15 @@ function openMediaViewer(mediaContents, startIdx) {
     function renderMedia() {
         const info = _getMediaSrc(mediaContents[currentIdx]);
         const display = document.getElementById('mv-display');
+        const dlBtn = document.getElementById('mv-download');
         if (info.type === 'image') {
             display.innerHTML = `<img src="${info.src}" alt="${info.name}" />`;
         } else {
             display.innerHTML = `<video src="${info.src}" controls autoplay></video>`;
         }
         document.getElementById('mv-counter').textContent = `${currentIdx + 1} / ${mediaContents.length}`;
+        dlBtn.href = info.src;
+        dlBtn.download = info.name.replace('incoming/', '');
     }
 
     window.mvNav = (dir) => {

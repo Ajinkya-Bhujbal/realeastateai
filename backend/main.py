@@ -1760,6 +1760,17 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
                                 s_db.commit()
                         finally:
                             s_db.close()
+                    else:
+                        print(f"Failed to download media: {media_id}")
+                        from db import SessionLocal
+                        s_db = SessionLocal()
+                        try:
+                            msg = s_db.query(Message).filter(Message.wa_message_id == msg_id).first()
+                            if msg:
+                                msg.content = f"⚠️ Failed to download attached {media_type}. {caption}".strip()
+                                s_db.commit()
+                        finally:
+                            s_db.close()
                 except Exception as e:
                     print(f"Error downloading media bg: {e}")
                     

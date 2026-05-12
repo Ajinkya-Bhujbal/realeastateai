@@ -174,7 +174,11 @@ def process_unread_messages():
 
                 # ── Combine ALL pending messages for intent detection + AI context ──
                 combined_msg_text = "\n".join(m.content for m in msgs if m.content)
-                combined_lower = combined_msg_text.lower()
+                
+                # Strip system tags (like [IMAGE:...]) so we don't false-trigger wants_media when they send a photo
+                import re
+                clean_text = re.sub(r'\[(?:image|video|audio|document|IMAGE|VIDEO)[^\]]*\]', '', combined_msg_text, flags=re.IGNORECASE)
+                combined_lower = clean_text.lower()
 
                 # Location keywords — check across ALL messages
                 wants_location = any(kw in combined_lower for kw in [
