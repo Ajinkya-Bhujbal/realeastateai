@@ -233,11 +233,61 @@ def health_check():
 
 @app.post("/api/leads")
 def create_lead(lead: LeadCreate, db: Session = Depends(get_db)):
-    """Create a new lead."""
+    """Create a new lead. If phone is provided, send welcome template immediately."""
     db_lead = Lead(**lead.model_dump())
     db.add(db_lead)
     db.commit()
     db.refresh(db_lead)
+
+    # ── Send WhatsApp welcome template in background if phone exists ──
+    if db_lead.phone:
+        import threading
+        from wa_guard import can_send_to
+
+        def _send_template_bg(lead_id, phone, name):
+            from db import SessionLocal
+            from welcome_sequence import send_welcome_sequence
+            from models import Lead, Message
+            wdb = SessionLocal()
+            try:
+                if not can_send_to(phone):
+                    try:
+                        print(f"[WA Guard] Blocked template to {phone} (live mode OFF, not in whitelist)")
+                    except Exception:
+                        pass
+                    return
+
+                template_result = send_welcome_sequence(phone, name)
+                template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
+                wdb.add(Message(
+                    lead_id=lead_id, direction="out", channel="whatsapp",
+                    content=f"[Template Sent: {template_name}]",
+                    status="sent" if template_result.get("success") or template_result.get("mock") else "failed",
+                    wa_message_id=template_result.get("message_id", ""),
+                    is_read=True,
+                ))
+                lead_obj = wdb.query(Lead).filter(Lead.id == lead_id).first()
+                if lead_obj:
+                    lead_obj.welcome_sent = True
+                    from datetime import datetime
+                    lead_obj.last_message_at = datetime.utcnow()
+                wdb.commit()
+                try:
+                    print(f"[Welcome] Template '{template_name}' sent to {name} ({phone})")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    print(f"[Welcome] Template error: {str(e).encode('ascii','replace').decode()}")
+                except Exception:
+                    pass
+            finally:
+                wdb.close()
+
+        t = threading.Thread(target=_send_template_bg, args=(db_lead.id, db_lead.phone, db_lead.name))
+        t.daemon = True
+        t.start()
+
     return {"id": db_lead.id, "name": db_lead.name, "status": "created"}
 
 
@@ -1364,12 +1414,14 @@ def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(
         db.commit()
         return {"status": "ok", "message": "Re-engagement template sent"}
     else:
-        # Send welcome template in background
+        # Send welcome template + full media sequence in background
         import threading
         from welcome_sequence import send_welcome_sequence
 
         def _run(phone_num, lid, lname):
+            import time as _time
             try:
+                # Step 1: Send template
                 result = send_welcome_sequence(phone_num, lead_name=lname)
                 print(f"Force welcome sent to {phone_num}: {result}")
                 wdb = SessionLocal()
@@ -1377,19 +1429,202 @@ def force_welcome(lead_id: int, req: ForceWelcomeRequest, db: Session = Depends(
                     wlead = wdb.query(Lead).filter(Lead.id == lid).first()
                     if wlead:
                         wlead.welcome_sent = True
+                        wlead.media_sent = True  # Mark media as sent so followup.py doesn't re-trigger
+                        wlead.status = "welcoming"
                         template_name = os.getenv("WA_TEMPLATE_NAME", "hello_world")
                         wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
                                         content=f"[Template Sent: {template_name}]", status="sent", is_read=True))
                     wdb.commit()
                 finally:
                     wdb.close()
+
+                # Step 2: Wait a bit, then send full media sequence
+                _time.sleep(5)
+
+                from welcome_sequence import get_amenity_photos, get_flat_videos
+                from whatsapp import upload_whatsapp_media as _upload
+
+                wdb2 = SessionLocal()
+                try:
+                    # Photo intro
+                    photo_intro = (
+                        "Please find below the photos of Free to use, Lavish Amenities in the society.\n"
+                        "(Note: All photos are real. \U0001f60a)\n"
+                        "\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447"
+                    )
+                    send_whatsapp_message(phone_num, photo_intro)
+                    wdb2.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                    content=photo_intro, status="sent", is_read=True))
+                    wdb2.commit()
+
+                    # Send amenity photos
+                    photos = get_amenity_photos()
+                    for photo_path in photos:
+                        try:
+                            fname = os.path.basename(photo_path)
+                            with open(photo_path, "rb") as f:
+                                file_bytes = f.read()
+                            ext = fname.rsplit(".", 1)[-1].lower()
+                            mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                            media_id = _upload(file_bytes, mime, fname)
+                            if media_id:
+                                send_whatsapp_message(phone_num, message=fname, media_id=media_id, media_type="image")
+                            wdb2.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                            content=f"[IMAGE:{fname}]", status="sent", is_read=True))
+                            wdb2.commit()
+                        except Exception:
+                            pass
+
+                    _time.sleep(30)
+
+                    # Video intro
+                    video_intro = (
+                        "Please find below the Videos of available flats for Sell and Rent both.\n"
+                        "( 1 / 2 / 2.5 / 3 / 4 BHK available )\n"
+                        "\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447\U0001f447"
+                    )
+                    send_whatsapp_message(phone_num, video_intro)
+                    wdb2.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                    content=video_intro, status="sent", is_read=True))
+                    wdb2.commit()
+
+                    # Send flat videos
+                    videos = get_flat_videos()
+                    for video_path in videos:
+                        try:
+                            fname = os.path.basename(video_path)
+                            with open(video_path, "rb") as f:
+                                file_bytes = f.read()
+                            media_id = _upload(file_bytes, "video/mp4", fname)
+                            if media_id:
+                                send_whatsapp_message(phone_num, message=fname, media_id=media_id, media_type="video")
+                            wdb2.add(Message(lead_id=lid, direction="out", channel="whatsapp",
+                                            content=f"[VIDEO:{fname}]", status="sent", is_read=True))
+                            wdb2.commit()
+                        except Exception:
+                            pass
+
+                    print(f"[ForceWelcome] Full sequence sent to {phone_num}: {len(photos)} photos, {len(videos)} videos")
+
+                    # Reset status from "welcoming" back to "new"
+                    wlead2 = wdb2.query(Lead).filter(Lead.id == lid).first()
+                    if wlead2 and wlead2.status == "welcoming":
+                        wlead2.status = "new"
+                        wlead2.last_message_at = datetime.datetime.now(datetime.timezone.utc)
+                    wdb2.commit()
+                finally:
+                    wdb2.close()
+
             except Exception as e:
                 print(f"Force welcome error: {e}")
 
         thread = threading.Thread(target=_run, args=(phone, lead.id, lead.name))
         thread.daemon = True
         thread.start()
-        return {"status": "ok", "message": "Welcome template started"}
+        return {"status": "ok", "message": "Welcome template + media sequence started"}
+
+
+# ─── WhatsApp Test Endpoint (Safe — Whitelist Only) ──────────────────
+
+@app.get("/api/wa/test")
+def wa_test_send_template(
+    phone: str = Query("7276720388", description="Phone number to test"),
+    template: str = Query(None, description="Template name (defaults to WA_TEMPLATE_NAME from .env)"),
+    name: str = Query("", description="Lead name for body parameter (optional)"),
+):
+    """
+    Send a WhatsApp template message to a phone number for testing.
+    Uploads an image for the header (required by vanaha_welcome_5).
+    Only sends to whitelisted numbers (safety guard enforced).
+    """
+    phone_clean = phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+    if len(phone_clean) > 10:
+        phone_clean = phone_clean[-10:]
+
+    if not can_send_to(phone_clean):
+        return {
+            "success": False,
+            "error": f"Phone {phone_clean} is NOT in the whitelist. Add it to WA_WHITELIST_PHONES in .env",
+            "whitelist": sorted(get_whitelist()),
+        }
+
+    template_name = template or os.getenv("WA_TEMPLATE_NAME", "hello_world")
+
+    # Upload an image for the template header (vanaha_welcome_5 requires IMAGE header)
+    import glob
+    header_image_id = None
+    media_base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "media")
+
+    # Try elevation image first, then fall back to first amenity photo
+    for search_pattern in [
+        os.path.join(media_base, "elevation*"),
+        os.path.join(media_base, "*.jpg"),
+        os.path.join(media_base, "*.jpeg"),
+        os.path.join(media_base, "*.png"),
+        os.path.join(media_base, "amenities", "*.jpeg"),
+        os.path.join(media_base, "amenities", "*.jpg"),
+        os.path.join(media_base, "amenities", "*.png"),
+    ]:
+        matches = sorted(glob.glob(search_pattern))
+        if matches:
+            img_path = matches[0]
+            try:
+                with open(img_path, "rb") as f:
+                    file_bytes = f.read()
+                fname = os.path.basename(img_path)
+                ext = fname.rsplit(".", 1)[-1].lower()
+                mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+                header_image_id = upload_whatsapp_media(file_bytes, mime, fname)
+                if header_image_id:
+                    print(f"[WA Test] Uploaded header image: {fname} -> {header_image_id}")
+                    break
+            except Exception as e:
+                print(f"[WA Test] Image upload error: {e}")
+            break
+
+    from whatsapp import send_whatsapp_template
+    result = send_whatsapp_template(
+        to_phone=phone_clean,
+        template_name=template_name,
+        header_image_id=header_image_id,
+    )
+    return {
+        "phone": phone_clean,
+        "template": template_name,
+        "header_image_uploaded": header_image_id is not None,
+        "header_image_id": header_image_id,
+        "result": result,
+        "live_mode": is_live_mode(),
+        "whitelist": sorted(get_whitelist()),
+    }
+
+
+@app.get("/api/wa/test-text")
+def wa_test_send_text(
+    phone: str = Query("7276720388", description="Phone number to test"),
+    message: str = Query("Hello from LeadPilot! 🏠 This is a test message.", description="Message text"),
+):
+    """
+    Send a plain text WhatsApp message to a phone for testing.
+    Only sends to whitelisted numbers (safety guard enforced).
+    """
+    phone_clean = phone.strip().replace("+", "").replace(" ", "").replace("-", "")
+    if len(phone_clean) > 10:
+        phone_clean = phone_clean[-10:]
+
+    if not can_send_to(phone_clean):
+        return {
+            "success": False,
+            "error": f"Phone {phone_clean} is NOT in the whitelist.",
+            "whitelist": sorted(get_whitelist()),
+        }
+
+    result = send_whatsapp_message(phone_clean, message)
+    return {
+        "phone": phone_clean,
+        "message": message,
+        "result": result,
+    }
 
 
 # ─── Knowledge Base API ──────────────────────────────────────────────
@@ -1438,6 +1673,12 @@ def verify_whatsapp_webhook(
 async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
     """Receive incoming messages from WhatsApp."""
     payload = await request.json()
+    try:
+        import json
+        print(f"[Webhook Raw] {json.dumps(payload)}")
+    except Exception:
+        pass
+        
     parsed = parse_webhook_message(payload)
     
     if parsed and parsed.get("message_text"):
@@ -1464,11 +1705,18 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
             db.refresh(lead)
 
         # Create incoming message
+        message_content = parsed["message_text"]
+        
+        # If it's a media message with a caption, the text is the caption. 
+        # If no caption, it's [type message]. We'll update it once downloaded.
+        if parsed.get("media_id"):
+            message_content = f"[MEDIA:{parsed['media_id']}] {message_content}"
+            
         incoming = Message(
             lead_id=lead.id,
             direction="in",
             channel="whatsapp",
-            content=parsed["message_text"],
+            content=message_content,
             status="received",
             wa_message_id=parsed["message_id"],
             is_read=False,
@@ -1479,36 +1727,52 @@ async def receive_whatsapp_webhook(request: Request, db: Session = Depends(get_d
         lead.unread_count = (lead.unread_count or 0) + 1
         db.commit()
 
-        # Send media sequence directly if this is the first reply from a new lead
-        if not lead.media_sent and can_send_to(phone_clean):
+        if parsed.get("media_id"):
+            from whatsapp import download_whatsapp_media
             import threading
-            from welcome_sequence import send_media_sequence, get_welcome_db_messages
-
-            def _run_media(phone_num, lead_id):
+            import os
+            
+            def _download_media_bg(media_id, msg_id, media_type, caption):
                 try:
-                    result = send_media_sequence(phone_num)
-                    print(f"Media sequence sent to {phone_num}: {result}")
-                    wdb = SessionLocal()
-                    try:
-                        wlead = wdb.query(Lead).filter(Lead.id == lead_id).first()
-                        if wlead:
-                            wlead.welcome_sent = True
-                            wlead.media_sent = True
-                            for m in get_welcome_db_messages():
-                                wdb.add(Message(lead_id=lead_id, direction="out", channel="whatsapp",
-                                                content=m["content"], status="sent", is_read=True))
-                        wdb.commit()
-                    finally:
-                        wdb.close()
+                    result = download_whatsapp_media(media_id)
+                    if result:
+                        file_bytes, mime = result
+                        ext = mime.split('/')[-1] if '/' in mime else 'bin'
+                        if ext == 'jpeg': ext = 'jpg'
+                        filename = f"incoming_{msg_id}.{ext}"
+                        
+                        media_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "media")
+                        incoming_dir = os.path.join(media_dir, "incoming")
+                        os.makedirs(incoming_dir, exist_ok=True)
+                        filepath = os.path.join(incoming_dir, filename)
+                        
+                        with open(filepath, "wb") as f:
+                            f.write(file_bytes)
+                        
+                        # Update the DB message
+                        from db import SessionLocal
+                        s_db = SessionLocal()
+                        try:
+                            msg = s_db.query(Message).filter(Message.wa_message_id == msg_id).first()
+                            if msg:
+                                tag = "IMAGE" if "image" in mime else "VIDEO" if "video" in mime else media_type.upper()
+                                msg.content = f"[{tag}:incoming/{filename}] {caption}".strip()
+                                s_db.commit()
+                        finally:
+                            s_db.close()
                 except Exception as e:
-                    print(f"Media sequence error: {e}")
-
-            incoming.is_auto_replied = True
-            db.commit()
-            thread = threading.Thread(target=_run_media, args=(phone_clean, lead.id))
-            thread.daemon = True
-            thread.start()
-            return {"status": "ok"}
+                    print(f"Error downloading media bg: {e}")
+                    
+            t = threading.Thread(target=_download_media_bg, args=(
+                parsed["media_id"], 
+                parsed["message_id"], 
+                parsed.get("type", "media"),
+                parsed["message_text"] if not parsed["message_text"].startswith("[") else ""
+            ))
+            t.daemon = True
+            t.start()
+        # Let the followup.py background poller handle the welcome media sequence 
+        # and AI reply generation. This guarantees no race conditions.
 
     return {"status": "ok"}
 

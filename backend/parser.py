@@ -64,7 +64,7 @@ def parse_lead_from_email(subject: str, body: str, sender: str = "", html_body: 
     # Extract Price (e.g., Rs 5200000, ₹ 18.0k, ₹ 1.2 Cr)
     if not result.get("price"):
         # Look for currency symbols followed by numbers and optional multipliers like k, L, Cr, Lac, Lakh
-        price_match = re.search(r'(?:Rs\.?|₹|INR)\s*([\d,.]+\s*(?:k|L|Cr|Lac|Lakhs|Crores|Lakh)?)', combined, re.IGNORECASE)
+        price_match = re.search(r'(?:\bRs\.?|₹|\bINR)\s*([\d,.]+\s*(?:k|L|Cr|Lac|Lakhs|Crores|Lakh)?\b)', combined, re.IGNORECASE)
         if price_match:
             result["price"] = price_match.group(0).strip()
         else:
@@ -687,11 +687,14 @@ def fetch_gmail_leads(
         mail.login(gmail_user, gmail_app_password)
         mail.select(folder)
 
+        import datetime
+        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%d-%b-%Y")
+
         search_queries = [
-            '(UNSEEN SINCE "03-May-2026" FROM "housing-mailer.com")',
-            '(UNSEEN SINCE "03-May-2026" FROM "housing.com")',
-            '(UNSEEN SINCE "03-May-2026" FROM "magicbricks.com")',
-            '(UNSEEN SINCE "03-May-2026" FROM "99acres.com")',
+            f'(SINCE "{yesterday}" FROM "housing-mailer.com")',
+            f'(SINCE "{yesterday}" FROM "housing.com")',
+            f'(SINCE "{yesterday}" FROM "magicbricks.com")',
+            f'(SINCE "{yesterday}" FROM "99acres.com")',
         ]
 
         all_email_ids = set()

@@ -81,7 +81,7 @@ def generate(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 300, tem
                     "num_predict": max_tokens,
                     "temperature": temperature,
                     "top_p": 0.9,
-                    "num_ctx": 4096,  # Gemma2 9B can handle 8192; 4096 is safe for RAM
+                    "num_ctx": 8192,  # Qwen2.5:7b supports 32K; 8192 balances quality vs RAM
                 },
             },
             timeout=120,
@@ -264,7 +264,13 @@ RULES:
 1. Keep reply to 1-2 sentences. End with a question.
 2. Brokerage is NOT rent. Brokerage is our service fee. For rent it equals 1 month rent. For buy it is zero.
 3. Never combine rent and buy prices in one answer.
+4. If you do not have the answer in the context or price table, tell the customer to contact Bhujbal Kaka at 7387457889 or 9359932740.
+5. If the customer wants to visit or asks for visit timing, ALWAYS reply with: "Yes, you can visit around 8 AM to 7 PM. If you want to visit after 7 PM then call on 7387457889 or 7387452275. Please confirm 30 minutes before you come."
+"""
+    if lead_context == "MEDIA_SEQUENCE_JUST_SENT":
+        prompt += "\n4. SPECIAL RULE: You have JUST sent all photos and videos natively. If the Customer's ONLY request is to see photos/videos/media, you MUST reply EXACTLY with the word 'SKIP_REPLY' and nothing else. If they asked another question, answer it normally without apologizing for media."
 
+    prompt += f"""
 CONTEXT:
 {context_text[:1500] if context_text else "Vanaha Township, Bavdhan, Pune. 12 min from Chellaram Hospital."}
 

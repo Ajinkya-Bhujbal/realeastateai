@@ -212,6 +212,34 @@ def _chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
     return chunks
 
 
+def _smart_chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    """Smart chunking: detect Q&A format (---- separators) and keep pairs together.
+    Falls back to character-based chunking for regular prose."""
+    import re
+
+    # Detect Q&A format: text has multiple ---- separators
+    separator_pattern = r'-{3,}'
+    separators = re.findall(separator_pattern, text)
+
+    if len(separators) >= 3:
+        # Q&A format detected — split on separator lines
+        sections = re.split(r'\s*-{3,}\s*', text)
+        chunks = []
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            # If a section is too large, sub-chunk it
+            if len(section) > chunk_size * 2:
+                chunks.extend(_chunk_text(section, chunk_size, overlap))
+            else:
+                chunks.append(section)
+        return chunks
+    else:
+        # Regular prose — use character-based chunking
+        return _chunk_text(text, chunk_size, overlap)
+
+
 def index_kb_file(filepath: str) -> int:
     """Index a single .txt or .md file into the KB collection."""
     collection = get_or_create_kb_collection()
@@ -227,7 +255,7 @@ def index_kb_file(filepath: str) -> int:
         return 0
 
     filename = os.path.basename(filepath)
-    chunks = _chunk_text(content)
+    chunks = _smart_chunk_text(content)
 
     if not chunks:
         return 0

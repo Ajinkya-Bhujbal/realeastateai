@@ -193,27 +193,46 @@ def send_welcome_sequence(phone: str, lead_name: str = None) -> dict:
     
     # Check if there's an elevation image to use as header
     header_image_id = None
-    elevation_files = _get_media_files(".", ("jpg", "jpeg", "png", "webp"))
-    elevation_path = next((f for f in elevation_files if "elevation" in os.path.basename(f).lower()), None)
     
-    if elevation_path:
+    # Try elevation image first, then fall back to first amenity photo
+    media_base = os.path.join(os.path.dirname(__file__), "..", "data", "media")
+    elevation_candidates = []
+    for root, dirs, files in os.walk(media_base):
+        for f in files:
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                if "elevation" in f.lower():
+                    elevation_candidates.append(os.path.join(root, f))
+
+    # Fallback: first amenity photo
+    if not elevation_candidates:
+        amenity_dir = os.path.join(media_base, "amenities")
+        if os.path.isdir(amenity_dir):
+            for f in sorted(os.listdir(amenity_dir)):
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    elevation_candidates.append(os.path.join(amenity_dir, f))
+                    break
+
+    image_path = elevation_candidates[0] if elevation_candidates else None
+    if image_path:
         try:
-            with open(elevation_path, "rb") as f:
+            with open(image_path, "rb") as f:
                 file_bytes = f.read()
-            filename = os.path.basename(elevation_path)
+            filename = os.path.basename(image_path)
             ext = filename.rsplit(".", 1)[-1].lower()
             mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
             header_image_id = upload_whatsapp_media(file_bytes, mime, filename)
+            try:
+                print(f"[Welcome] Header image uploaded: {filename} -> {header_image_id}")
+            except Exception:
+                pass
         except Exception as e:
-            print(f"[Welcome] Error uploading elevation image: {e}")
+            print(f"[Welcome] Error uploading header image: {e}")
 
-    body_params = [lead_name.split()[0]] if lead_name and lead_name.lower() != "unknown" else []
-    
+    # vanaha_welcome_5 has no body parameters — don't send any
     result = send_whatsapp_template(
         to_phone=phone,
         template_name=template_name,
         header_image_id=header_image_id,
-        body_params=body_params
     )
     
     if result.get("success"):

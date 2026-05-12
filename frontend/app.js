@@ -49,7 +49,7 @@ function renderMsgContent(content) {
             || fname.toLowerCase().includes('indoor') || fname.toLowerCase().includes('yoga')
             || fname.toLowerCase().includes('reading') || fname.toLowerCase().includes('work');
         const folder = isAmenity ? 'amenities' : 'flats';
-        const src = `/media/${folder}/${fname}`;
+        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/${folder}/${fname}`;
         return `<div class="wa-media-img" onclick='openMediaViewer(["[IMAGE:${fname}]"], 0)'>
             <img src="${src}" alt="${esc(fname)}" loading="lazy" />
         </div>`;
@@ -59,7 +59,7 @@ function renderMsgContent(content) {
     const vidMatch = content.match(/^\[VIDEO:(.+?)\]$/);
     if (vidMatch) {
         const fname = vidMatch[1];
-        const src = `/media/flats/${fname}`;
+        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/flats/${fname}`;
         return `<div class="wa-media-vid" onclick='openMediaViewer(["[VIDEO:${fname}]"], 0)'>
             <video src="${src}" preload="metadata" style="max-width:100%;border-radius:8px;"></video>
             <div class="wa-media-label">🎬 ${esc(fname)} (Click to play big)</div>
@@ -243,7 +243,7 @@ async function loadLeads() {
         const arrivedAt = l.updated_at || l.created_at;
         // Build tag display — show DEALER/BROKER/OWNER as special badges
         const tagUpper = (l.tag || 'NEW').toUpperCase();
-        const isSpecialTag = ['DEALER', 'BROKER', 'OWNER'].includes(tagUpper);
+        const isSpecialTag = ['DEALER', 'BROKER', 'OWNER', 'DUPLICATE'].includes(tagUpper);
         const tagBadge = isSpecialTag
             ? `<span class="badge badge-role badge-${tagUpper.toLowerCase()}">${tagUpper}</span>`
             : '';
@@ -269,13 +269,14 @@ async function loadLeads() {
             <td>
                 <select class="input tag-select" onchange="updateTag(${l.id}, this)">
                     <option value="NEW" ${l.tag === 'NEW' ? 'selected' : ''}>NEW</option>
+                    <option value="DUPLICATE" ${l.tag === 'DUPLICATE' ? 'selected' : ''}>DUPLICATE</option>
                     <option value="DEALER" ${l.tag === 'DEALER' ? 'selected' : ''}>DEALER</option>
                     <option value="BROKER" ${l.tag === 'BROKER' ? 'selected' : ''}>BROKER</option>
                     <option value="OWNER" ${l.tag === 'OWNER' ? 'selected' : ''}>OWNER</option>
                     <option value="visited" ${l.tag === 'visited' ? 'selected' : ''}>Visited</option>
                     <option value="interested" ${l.tag === 'interested' ? 'selected' : ''}>Interested</option>
                     <option value="not interested" ${l.tag === 'not interested' ? 'selected' : ''}>Not Interested</option>
-                    ${!['NEW', 'DEALER', 'BROKER', 'OWNER', 'visited', 'interested', 'not interested'].includes(l.tag || 'NEW') ? `<option value="${esc(l.tag)}" selected>${esc(l.tag)}</option>` : ''}
+                    ${!['NEW', 'DUPLICATE', 'DEALER', 'BROKER', 'OWNER', 'visited', 'interested', 'not interested'].includes(l.tag || 'NEW') ? `<option value="${esc(l.tag)}" selected>${esc(l.tag)}</option>` : ''}
                     <option value="_custom">+ Custom Tag...</option>
                 </select>
             </td>
@@ -632,13 +633,13 @@ window.selectChat = async function (leadId) {
                             || fl.includes('indoor') || fl.includes('yoga') || fl.includes('reading') || fl.includes('work')
                             || fl.includes('multipurpose');
                         const folder = isAmenity ? 'amenities' : 'flats';
-                        const src = `/media/${folder}/${fname}`;
+                        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/${folder}/${fname}`;
                         html += `<div class="wa-gallery-item" data-idx="${idx}">
                             <img src="${src}" alt="${esc(fname)}" loading="lazy" />
                         </div>`;
                     } else if (vidMatch) {
                         const fname = vidMatch[1];
-                        const src = `/media/flats/${fname}`;
+                        const src = fname.startsWith('incoming/') ? `/media/${fname}` : `/media/flats/${fname}`;
                         html += `<div class="wa-gallery-item" data-idx="${idx}">
                             <video src="${src}" preload="metadata"></video>
                             <div class="wa-gallery-play">▶</div>

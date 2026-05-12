@@ -163,17 +163,14 @@ def process_unread_messages():
                     db.commit()
                     continue
 
-                # ── MEDIA SEQUENCE: DISABLED AUTO-TRIGGER ──
-                # Media (photos/videos) is now ONLY sent when:
-                # 1. User explicitly asks for photos/videos (handled by wants_media below)
-                # 2. Admin manually triggers it via the UI reset-welcome button
-                # Auto-sending media on first reply was causing issues:
-                # user asks a question → gets media dump instead of an answer.
-                if lead.welcome_sent and not lead.media_sent:
-                    # Just mark media_sent=True to prevent future auto-triggers
-                    # but do NOT send the media sequence — let the AI answer instead
-                    lead.media_sent = True
+                # ── Defer AI if welcome sequence is currently running ──
+                if lead.status == "welcoming":
+                    for m in msgs:
+                        m.processing_lock_at = None
                     db.commit()
+                    continue
+
+
 
                 # ── Combine ALL pending messages for intent detection + AI context ──
                 combined_msg_text = "\n".join(m.content for m in msgs if m.content)
@@ -845,14 +842,13 @@ def _process_pending_raw_emails(db):
             if phone:
                 existing_lead = db.query(Lead).filter(Lead.phone == phone).first()
                 if existing_lead:
-                    # Update the existing lead's timestamp so it appears at the top
+                    # Bump to top: set updated_at to NOW so it sorts first on dashboard
+                    existing_lead.updated_at = datetime.datetime.now(datetime.timezone.utc)
+                    # Update created_at to latest email time so "Arrived" reflects latest inquiry
                     if raw_email.received_at:
-                        existing_lead.updated_at = raw_email.received_at
-                    else:
-                        existing_lead.updated_at = datetime.datetime.now(datetime.timezone.utc)
-                    # Apply tag if existing lead has no meaningful tag and we found one
-                    if parsed_tag and (not existing_lead.tag or existing_lead.tag == "NEW"):
-                        existing_lead.tag = parsed_tag
+                        existing_lead.created_at = raw_email.received_at
+                    # Mark as DUPLICATE so user can see it's a repeat inquiry
+                    existing_lead.tag = "DUPLICATE"
                     # Count email touches in notes
                     touch_count = db.query(RawEmail).filter(
                         RawEmail.lead_id == existing_lead.id
@@ -906,8 +902,9 @@ def _process_pending_raw_emails(db):
             db.flush()  # Get the lead ID
 
             # Automatically trigger welcome template for new parsed leads
-            from wa_guard import can_send_to
-            if not lead.welcome_sent and can_send_to(lead.phone):
+            # ONLY when Live Mode toggle is ON on the dashboard
+            from wa_guard import can_send_to, is_live_mode
+            if is_live_mode() and not lead.welcome_sent and can_send_to(lead.phone):
                 import threading
                 from welcome_sequence import send_welcome_sequence
                 import os
@@ -926,10 +923,17 @@ def _process_pending_raw_emails(db):
                                 wdb.add(Message(lead_id=lid, direction="out", channel="whatsapp",
                                                 content=f"[Template Sent: {template_name}]", status="sent", is_read=True))
                             wdb.commit()
+                            try:
+                                print(f"[Welcome] Email lead template sent to {lname} ({phone_num})")
+                            except Exception:
+                                pass
                         finally:
                             wdb.close()
                     except Exception as e:
-                        print(f"Auto-welcome error: {e}")
+                        try:
+                            print(f"Auto-welcome error: {str(e).encode('ascii','replace').decode()}")
+                        except Exception:
+                            pass
 
                 thread = threading.Thread(target=_run_welcome_auto, args=(lead.phone, lead.id, lead.name))
                 thread.daemon = True

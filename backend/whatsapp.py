@@ -118,6 +118,42 @@ def upload_whatsapp_media(file_bytes: bytes, mime_type: str, filename: str) -> O
     return None
 
 
+def download_whatsapp_media(media_id: str) -> Optional[tuple[bytes, str]]:
+    """Download media from WhatsApp API and return (file_bytes, mime_type)."""
+    if not WA_PHONE_NUMBER_ID or not WA_ACCESS_TOKEN:
+        return None
+
+    # Step 1: Get media URL
+    url = f"{WA_API_URL}/{media_id}"
+    headers = {
+        "Authorization": f"Bearer {WA_ACCESS_TOKEN}"
+    }
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            print(f"WA Media info fetch failed: {r.json()}")
+            return None
+        
+        data = r.json()
+        media_url = data.get("url")
+        mime_type = data.get("mime_type", "")
+        
+        if not media_url:
+            return None
+
+        # Step 2: Download the media file bytes
+        r2 = requests.get(media_url, headers=headers, timeout=60)
+        if r2.status_code == 200:
+            return r2.content, mime_type
+        else:
+            print(f"WA Media download failed: {r2.status_code}")
+            return None
+    except Exception as e:
+        print(f"WA Media download error: {e}")
+        return None
+
+
 def send_whatsapp_template(to_phone: str, template_name: str, language: str = "en",
                            header_image_id: str = None, body_params: list = None) -> dict:
     """
@@ -225,6 +261,16 @@ def parse_webhook_message(payload: dict) -> Optional[dict]:
                 result["message_text"] = interactive.get("button_reply", {}).get("title", "")
             elif interactive.get("type") == "list_reply":
                 result["message_text"] = interactive.get("list_reply", {}).get("title", "")
+        elif msg.get("type") in ["image", "video", "audio", "document", "sticker"]:
+            media_type = msg.get("type")
+            media_obj = msg.get(media_type, {})
+            result["media_id"] = media_obj.get("id", "")
+            result["mime_type"] = media_obj.get("mime_type", "")
+            caption = media_obj.get("caption", "")
+            if caption:
+                result["message_text"] = caption
+            else:
+                result["message_text"] = f"[{media_type} message]"
         else:
             result["message_text"] = f"[{msg.get('type', 'unknown')} message]"
 
