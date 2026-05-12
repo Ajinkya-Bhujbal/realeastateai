@@ -171,8 +171,8 @@ def process_unread_messages():
                     continue
 
                 # ── TRIGGER MEDIA SEQUENCE ON FIRST REPLY ──
-                if lead.status == "new" and lead.welcome_sent:
-                    # User replied for the first time after template was sent!
+                if lead.status == "new":
+                    # User replied for the first time (or sent us a message directly)!
                     # Trigger the welcome media sequence.
                     lead.status = "welcoming"
                     for m in msgs:
