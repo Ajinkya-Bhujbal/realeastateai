@@ -261,8 +261,8 @@ async function loadLeads() {
     const tb = $('leads-tbody');
     if (d.leads.length === 0) { tb.innerHTML = '<tr><td colspan="10" class="empty-state">No leads found</td></tr>'; return; }
     tb.innerHTML = d.leads.map(l => {
-        // Determine the "arrived" time — use updated_at (reflects latest email arrival) or created_at
-        const arrivedAt = l.updated_at || l.created_at;
+        // Determine the "arrived" time — use created_at (reflects latest email arrival)
+        const arrivedAt = l.created_at;
         // Build tag display — show DEALER/BROKER/OWNER as special badges
         const tagUpper = (l.tag || 'NEW').toUpperCase();
         const isSpecialTag = ['DEALER', 'BROKER', 'OWNER', 'DUPLICATE'].includes(tagUpper);

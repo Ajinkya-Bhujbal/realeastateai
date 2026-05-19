@@ -315,8 +315,8 @@ def list_leads(
             | (Lead.email.ilike(f"%{search}%"))
         )
     total = q.count()
-    # Sort by updated_at DESC (reflects latest email arrival), then created_at DESC
-    leads = q.order_by(Lead.updated_at.desc(), Lead.created_at.desc()).offset(skip).limit(limit).all()
+    # Sort by created_at DESC (reflects latest email arrival)
+    leads = q.order_by(Lead.created_at.desc()).offset(skip).limit(limit).all()
 
     # Get email counts per lead from raw_emails table
     lead_ids = [l.id for l in leads]
@@ -641,6 +641,22 @@ async def whatsapp_webhook_receive(request: Request, db: Session = Depends(get_d
     """Receive incoming WhatsApp messages. Stores as unread; auto-reply handled by scheduler."""
     try:
         payload = await request.json()
+        import json
+        
+        # Log statuses to see delivery errors from Meta
+        if "entry" in payload and payload["entry"]:
+            changes = payload["entry"][0].get("changes", [])
+            if changes:
+                value = changes[0].get("value", {})
+                if "statuses" in value:
+                    status_obj = value["statuses"][0]
+                    status_type = status_obj.get("status")
+                    recipient = status_obj.get("recipient_id")
+                    print(f"\\n[WA Delivery Status] Status: {status_type} | To: {recipient}")
+                    if "errors" in status_obj:
+                        print(f"[WA Delivery Error Detail]: {json.dumps(status_obj['errors'], indent=2)}")
+                        with open("wa_webhook_errors.log", "a") as f:
+                            f.write(f"\\n{json.dumps(status_obj, indent=2)}")
     except Exception:
         return JSONResponse({"status": "ok"})
 

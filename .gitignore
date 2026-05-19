@@ -63,3 +63,16 @@ scratch/
 ehthumbs.db
 Thumbs.db
 pass
+
+# Debug & test files (not needed for production)
+11282.html
+non_ascii.txt
+push.bat
+check_leads.py
+test_imap.py
+test_upload.py
+backend/debug_emails.py
+backend/test_gmail_pipeline.py
+backend/test_parser.py
+scraped_leads/
+data/local_crm.db

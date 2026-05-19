@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Armstrong Properties | Premium Real Estate</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #c2a672; /* Premium Gold/Bronze */
+            --bg-dark: #0f1115;
+            --bg-card: rgba(255, 255, 255, 0.03);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        h1, h2, h3 {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+        }
+
+        /* Hero Section */
+        .hero {
+            position: relative;
+            height: 80vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 0 20px;
+            background: linear-gradient(to bottom, rgba(15, 17, 21, 0.4), rgba(15, 17, 21, 1)), 
+                        url('images/01_amenity_space.jpeg') center/cover no-repeat;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(circle at center, transparent 0%, var(--bg-dark) 100%);
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 1;
+            max-width: 800px;
+            animation: fadeIn 1.5s ease-out;
+        }
+
+        .hero-content h1 {
+            font-size: 4rem;
+            letter-spacing: -1px;
+            margin-bottom: 10px;
+            background: linear-gradient(to right, #fff, #c2a672);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-content p {
+            font-size: 1.2rem;
+            color: var(--text-muted);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+
+        /* Main Container */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 4rem 20px;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            color: var(--text-main);
+        }
+
+        .section-title span {
+            color: var(--primary);
+        }
+
+        /* Glassmorphism About Section */
+        .about-glass {
+            background: var(--bg-card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 3rem;
+            margin-bottom: 5rem;
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+            transition: transform 0.3s ease;
+        }
+        
+        .about-glass:hover {
+            transform: translateY(-5px);
+        }
+
+        .about-glass p {
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            max-width: 800px;
+            margin: 0 auto 1.5rem auto;
+        }
+
+        /* Services Grid */
+        .services {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+            margin-bottom: 5rem;
+        }
+
+        .service-card {
+            background: linear-gradient(145deg, #161920, #0c0e12);
+            padding: 2.5rem 2rem;
+            border-radius: 16px;
+            border: 1px solid rgba(194, 166, 114, 0.1);
+            transition: all 0.4s ease;
+        }
+
+        .service-card:hover {
+            transform: translateY(-10px);
+            border-color: var(--primary);
+            box-shadow: 0 10px 30px rgba(194, 166, 114, 0.1);
+        }
+
+        .service-card h3 {
+            color: var(--primary);
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .service-card p {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        /* Stunning Gallery */
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 5rem;
+        }
+
+        .gallery-item {
+            position: relative;
+            height: 300px;
+            border-radius: 16px;
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        .gallery-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.7s cubic-bezier(0.165, 0.84, 0.44, 1);
+        }
+
+        .gallery-item::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+
+        .gallery-item:hover img {
+            transform: scale(1.1);
+        }
+
+        .gallery-item:hover::after {
+            opacity: 1;
+        }
+
+        /* Contact Section */
+        .contact-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 3rem;
+            background: var(--bg-card);
+            border-radius: 20px;
+            padding: 4rem;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .contact-details h3 {
+            font-size: 2rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .contact-item {
+            margin-bottom: 1.5rem;
+        }
+
+        .contact-item span {
+            display: block;
+            color: var(--primary);
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+
+        .contact-item p {
+            font-size: 1.2rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 3rem;
+            color: #475569;
+            border-top: 1px solid rgba(255,255,255,0.05);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 768px) {
+            .hero-content h1 { font-size: 2.5rem; }
+            .contact-section { grid-template-columns: 1fr; padding: 2rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <section class="hero">
+        <div class="hero-content">
+            <h1>Armstrong Properties</h1>
+            <p>Elevate Your Lifestyle in Pune</p>
+        </div>
+    </section>
+
+    <div class="container">
+        
+        <div class="about-glass">
+            <h2>Your Trusted Real Estate Partner</h2>
+            <br>
+            <p>Specializing in the premium Bavdhan area and the prestigious Shapoorji Pallonji Vanaha township. With deep local expertise, we curate exceptional residential and commercial property experiences.</p>
+            <p>Transparency, premium service, and seamless paperwork are the hallmarks of our agency.</p>
+        </div>
+
+        <h2 class="section-title">Exclusive <span>Services</span></h2>
+        <div class="services">
+            <div class="service-card">
+                <h3>Residential Sales</h3>
+                <p>Find your dream home with our curated portfolio of premium 1, 2, 3, and 4 BHK apartments in prime locations.</p>
+            </div>
+            <div class="service-card">
+                <h3>Premium Rentals</h3>
+                <p>Connecting discerning tenants with high-end properties and ensuring a seamless leasing process.</p>
+            </div>
+            <div class="service-card">
+                <h3>Vanaha Township</h3>
+                <p>Exclusive focus and unparalleled expertise in the sought-after Shapoorji Pallonji Vanaha ecosystem.</p>
+            </div>
+        </div>
+
+        <h2 class="section-title">Property <span>Showcase</span></h2>
+        <div class="gallery">
+            <div class="gallery-item">
+                <img src="images/05_swimming_pool.jpeg" alt="Resort Style Pool">
+            </div>
+            <div class="gallery-item">
+                <img src="images/17_Gym.jpeg" alt="State of the Art Gym">
+            </div>
+            <div class="gallery-item">
+                <img src="images/08_Multipurpose_ground.jpeg" alt="Multipurpose Ground">
+            </div>
+            <div class="gallery-item">
+                <img src="images/01_amenity_space.jpeg" alt="Premium Amenity Space">
+            </div>
+        </div>
+
+        <div class="contact-section">
+            <div class="contact-details">
+                <h3>Get in Touch</h3>
+                <p style="color: var(--text-muted); margin-bottom: 2rem;">Ready to find your perfect property? Reach out to our expert consultants today.</p>
+                
+                <div class="contact-item">
+                    <span>Direct / WhatsApp</span>
+                    <p>+91 73874 52275</p>
+                </div>
+                <div class="contact-item">
+                    <span>Alternate Contact</span>
+                    <p>+91 93599 32740</p>
+                </div>
+            </div>
+            <div class="contact-details">
+                <br><br>
+                <div class="contact-item">
+                    <span>Service Area</span>
+                    <p>Bavdhan & West Pune</p>
+                </div>
+                <div class="contact-item">
+                    <span>Office Location</span>
+                    <p>S. No. 59/1A H. No. 407, Tarawade Vasti, Mohammed Wadi<br>Op. to Mohammed Wadi Police Station, Tarwade Vasti<br>Hadapsar, Haveli, Pune, Maharashtra</p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <footer>
+        &copy; 2026 Armstrong Properties. All Rights Reserved.
+    </footer>
+
+</body>
+</html>
